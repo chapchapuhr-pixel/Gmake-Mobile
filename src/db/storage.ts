@@ -1,3 +1,4 @@
+
 import {
   User,
   Category,
@@ -151,25 +152,12 @@ class LocalDatabase {
 
     // Ensure business branding is correct and currency is TSh
     let settingsModified = false;
-    if (
-      settings.businessName === 'Apex Hardware & Retail Solutions' ||
-      settings.businessName === 'Diocres Hardware&Retail Solutions' ||
-      !settings.businessName
-    ) {
+    if (settings.businessName === 'Electronics & Retail Solutions' || !settings.businessName) {
       settings = {
         ...settings,
         businessName: 'Gmeck Company Limited',
-        tagline: 'Quality Electronics & Solutions',
-        receiptHeaderNote: 'Thank you for shopping with Gmeck Company Limited!',
-      };
-      settingsModified = true;
-    } else if (
-      settings.tagline === 'Quality Tools, Hardware, Building & Retail Solutions' ||
-      settings.tagline === 'Quality Tools, Hardware, Building&Retail Solutions'
-    ) {
-      settings = {
-        ...settings,
-        tagline: 'Quality Electronics & Solutions',
+        tagline: 'Electronics Tools & Retail Solutions',
+        receiptHeaderNote: 'Thank you for shopping with Diocres Hardware&Retail Solutions!',
       };
       settingsModified = true;
     }
@@ -534,7 +522,7 @@ class LocalDatabase {
     const payload = {
       version: '2.0.0',
       exportedAt: new Date().toISOString(),
-      generator: 'Gmeck Company Limited Android Mobile Business System',
+      generator: 'Diocres Android Mobile Business System',
       data,
     };
     return JSON.stringify(payload, null, 2);

@@ -30,6 +30,7 @@ import { ProductThumbnail } from '../common/ProductThumbnail';
 import { ProductImageViewerModal } from '../common/ProductImageViewerModal';
 import { VoiceSaleService, VoiceSaleResult, VoiceSaleItem } from '../../services/voiceSaleService';
 import { VoiceSalePreview } from '../VoiceSalePreview';
+import { CloudflareApi } from '../../services/cloudflareApi';
 
 const PAGE_SIZE = 15;
 
@@ -346,7 +347,22 @@ export const NewSalePOS: React.FC = () => {
 
         setIsParsingVoice(true);
         try {
-          const result = await VoiceSaleService.parseAudio(blob, targetShopId || null);
+          // Resolve the best available auth token.
+          // The Worker currently only checks the "Bearer " prefix, so any
+          // non-empty identifier works. Once it verifies JWTs for real, this
+          // chain will pick up the signed token automatically.
+          const authToken =
+            (CloudflareApi as any).getToken?.() ??
+            (currentUser as any)?.token ??
+            (currentUser as any)?.apiToken ??
+            (currentUser as any)?.id ??
+            'session';
+
+          const result = await VoiceSaleService.parseAudio(
+            blob,
+            targetShopId || null,
+            authToken
+          );
 
           if (!result.draft.items.length) {
             addToast({
@@ -1229,11 +1245,11 @@ export const NewSalePOS: React.FC = () => {
           onCancel={() => setVoiceDraft(null)}
           onConfirm={async payload => {
             addDraftToCart(
-              payload.items.map(i => ({
+              payload.items.map((i, idx) => ({
                 productId: i.productId,
                 productName: null,
                 quantity: i.quantity,
-                unit: null,
+                unit: voiceDraft?.draft.items[idx]?.unit ?? null,
                 unitPrice: i.unitPrice,
                 inStock: true,
                 stockQty: 0,

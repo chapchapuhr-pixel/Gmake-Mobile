@@ -36,7 +36,6 @@ const PAGE_SIZE = 15;
 
 // ─────────────────────────────────────────────────────────────
 // Unit helpers — detect if a product is sold by decimal measure
-// (kg, g, liter, ml, meter, sentimita) vs. discrete pieces.
 // ─────────────────────────────────────────────────────────────
 const DECIMAL_UNIT_REGEX = /(kg|kilogram|g\b|gram|liter|litre|^l$|\bl\b|ml|milliliter|millilitre|meter|mita|metre|^m$|\bm\b|sentimita|cm|oz|lb)/i;
 
@@ -118,14 +117,17 @@ export const NewSalePOS: React.FC = () => {
   }, [dbState.categories, targetShopId]);
 
   // ─────────────────────────────────────────────────────────────
-  // FILTER + SORT (most-selling first)
+  // FILTER + SORT (Only show if there is a search query!)
   // ─────────────────────────────────────────────────────────────
   const filteredProducts = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim();
+    
+    // ✅ NEW: If search is empty, return empty array (hide all products)
+    if (!q) return [];
+
     const filtered = products.filter(p => {
       const matchesCategory = selectedCategory === 'ALL' || p.categoryId === selectedCategory;
-      const q = searchQuery.toLowerCase().trim();
       const matchesSearch =
-        !q ||
         p.name.toLowerCase().includes(q) ||
         p.sku.toLowerCase().includes(q) ||
         p.barcode.toLowerCase().includes(q);
@@ -222,10 +224,13 @@ export const NewSalePOS: React.FC = () => {
       return;
     }
 
-    // ✅ NEW: Auto-open the cart on mobile so the seller doesn't have to tap "Kikapu" manually
+    // ✅ Auto-open the cart on mobile so the seller doesn't have to tap "Kikapu" manually
     if (window.innerWidth < 1024) {
       setIsMobileCartOpen(true);
     }
+
+    // Clear search after adding so they can search for the next item quickly
+    setSearchQuery('');
 
     setCart(prev => {
       const existing = prev.find(item => item.product.id === product.id);
@@ -265,7 +270,6 @@ export const NewSalePOS: React.FC = () => {
 
   // ─────────────────────────────────────────────────────────────
   // Voice → Cart batch add
-  // Merges into existing lines, honors stock caps and decimal units.
   // ─────────────────────────────────────────────────────────────
   const addDraftToCart = (items: VoiceSaleItem[]) => {
     const warnings: string[] = [];
@@ -570,7 +574,7 @@ export const NewSalePOS: React.FC = () => {
   };
 
   // ─────────────────────────────────────────────────────────────
-  // Complete Sale — DECIMAL-AWARE validation
+  // Complete Sale
   // ─────────────────────────────────────────────────────────────
   const handleCompleteSale = () => {
     if (!currentUser) return;
@@ -694,7 +698,7 @@ export const NewSalePOS: React.FC = () => {
             <ShoppingCart className="w-12 h-12 mb-3 text-slate-700" />
             <p className="text-sm font-semibold text-slate-400">Cart is Empty</p>
             <p className="text-xs text-slate-600 mt-1">
-              Tap product cards, scan barcodes, or tap the mic to begin.
+              Search or scan products above to begin.
             </p>
           </div>
         ) : (
@@ -1034,33 +1038,36 @@ export const NewSalePOS: React.FC = () => {
           </div>
 
           {/* Result count hint */}
-          {filteredProducts.length > 0 && (
+          {searchQuery && filteredProducts.length > 0 && (
             <div className="flex items-center gap-1 text-[10px] text-slate-500">
               <TrendingUp className="w-3 h-3 text-emerald-400 shrink-0" />
               <span className="truncate">
-                Showing{' '}
-                <span className="text-slate-300 font-semibold">
-                  {Math.min(visibleCount, filteredProducts.length)}
-                </span>{' '}
-                of{' '}
-                <span className="text-slate-300 font-semibold">{filteredProducts.length}</span>
-                {!searchQuery && ' (top sellers first)'}
+                Found{' '}
+                <span className="text-slate-300 font-semibold">{filteredProducts.length}</span> matches for "{searchQuery}"
               </span>
             </div>
           )}
         </div>
 
-        {/* Product Grid */}
+        {/* Product List (Only shows when searching) */}
         <div className="flex-1 p-2.5 sm:p-4 overflow-y-auto pb-24 lg:pb-4">
-          {filteredProducts.length === 0 ? (
+          {!searchQuery ? (
+            <div className="h-full flex flex-col items-center justify-center text-center p-8 text-slate-500 opacity-60">
+              <Search className="w-12 h-12 mb-3 text-slate-700" />
+              <p className="text-sm font-medium text-slate-400">Search for a product to start</p>
+              <p className="text-xs text-slate-600 mt-1 max-w-[250px]">
+                Type a name or SKU above, or use the mic to speak the sale.
+              </p>
+            </div>
+          ) : filteredProducts.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center p-8 text-slate-500">
               <Layers className="w-10 h-10 mb-2 opacity-40" />
               <p className="text-sm font-medium text-slate-400">Hakuna bidhaa inayolingana</p>
-              <p className="text-xs text-slate-600 mt-1">Chagua kundi jingine au tumia neno tofauti.</p>
+              <p className="text-xs text-slate-600 mt-1">Jaribu neno lingine au tumia barcode.</p>
             </div>
           ) : (
             <>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-3 xl:grid-cols-4 gap-2 sm:gap-3">
+              <div className="space-y-2 max-w-2xl mx-auto">
                 {visibleProducts.map(product => {
                   const isOutOfStock = product.currentStock <= 0;
                   const isLowStock = product.currentStock > 0 && product.currentStock <= product.minStock;
@@ -1071,66 +1078,53 @@ export const NewSalePOS: React.FC = () => {
                     <div
                       key={product.id}
                       id={`pos-product-${product.id}`}
-                      className={`p-2 sm:p-2.5 rounded-xl border transition-all flex flex-col justify-between h-36 relative overflow-hidden group active:scale-[0.98] ${
+                      onClick={() => !isOutOfStock && addToCart(product)}
+                      className={`p-3 rounded-xl border transition-all flex items-center justify-between gap-3 group cursor-pointer active:scale-[0.99] ${
                         isOutOfStock
                           ? 'bg-slate-900/40 border-slate-800/60 opacity-50'
-                          : 'bg-slate-900 border-slate-800 hover:border-blue-500/50 hover:bg-slate-850 hover:shadow-lg'
+                          : 'bg-slate-900 border-slate-800 hover:border-blue-500/50 hover:bg-slate-850 shadow-sm'
                       }`}
                     >
-                      <div>
-                        <div className="flex items-start justify-between gap-1 mb-1">
-                          <div className="flex items-center gap-1 min-w-0 flex-1">
-                            <span className="text-[9px] sm:text-[10px] font-mono text-slate-400 truncate">{product.sku}</span>
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <ProductThumbnail
+                          product={product}
+                          size="sm"
+                          onClick={() => { setViewingProduct(product); setIsViewerOpen(true); }}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h4 className="text-sm font-semibold text-white truncate">{product.name}</h4>
                             {unitsSold > 0 && (
                               <span
-                                className="text-[8px] sm:text-[9px] px-1 py-0.2 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 font-bold shrink-0"
+                                className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 font-bold shrink-0"
                                 title={`${unitsSold} units sold`}
                               >
                                 🔥 {Number(unitsSold.toFixed(2))}
                               </span>
                             )}
                           </div>
-                          {isOutOfStock ? (
-                            <span className="text-[8px] sm:text-[9px] px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-400 border border-rose-500/30 shrink-0">Imeisha</span>
-                          ) : isLowStock ? (
-                            <span className="text-[8px] sm:text-[9px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30 font-semibold shrink-0">{product.currentStock} {product.unit}</span>
-                          ) : (
-                            <span className="text-[8px] sm:text-[9px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 shrink-0">{product.currentStock} {product.unit}</span>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-1.5 sm:gap-2">
-                          <ProductThumbnail
-                            product={product}
-                            size="sm"
-                            onClick={() => { setViewingProduct(product); setIsViewerOpen(true); }}
-                          />
-                          <h4
-                            onClick={() => !isOutOfStock && addToCart(product)}
-                            className="text-xs font-semibold text-white line-clamp-2 transition flex-1 min-w-0 cursor-pointer hover:text-blue-300"
-                            title={product.name}
-                          >
-                            {product.name}
-                          </h4>
+                          <div className="flex items-center gap-3 text-xs text-slate-400 mt-1 flex-wrap">
+                            <span className="font-mono">{product.sku}</span>
+                            <span className="text-slate-600">•</span>
+                            <span className={isOutOfStock ? 'text-rose-400 font-bold' : isLowStock ? 'text-amber-400 font-bold' : ''}>
+                              {isOutOfStock ? 'Out of Stock' : `${product.currentStock} ${product.unit} left`}
+                            </span>
+                          </div>
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between mt-1 pt-1.5 border-t border-slate-800/60">
-                        <span className="text-xs font-bold text-emerald-400 font-mono">
-                          {formatCurrency(product.sellingPrice, settings.currencySymbol)}
+                      <div className="flex items-center gap-3 shrink-0">
+                        <div className="text-right">
+                          <span className="text-sm font-bold text-emerald-400 font-mono">
+                            {formatCurrency(product.sellingPrice, settings.currencySymbol)}
+                          </span>
                           {decimalUnit && (
-                            <span className="text-[9px] text-slate-500 font-normal"> /{product.unit}</span>
+                            <div className="text-[9px] text-slate-500 font-normal">per {product.unit}</div>
                           )}
-                        </span>
-                        <button
-                          type="button"
-                          disabled={isOutOfStock}
-                          onClick={() => addToCart(product)}
-                          className="w-7 h-7 sm:w-6 sm:h-6 rounded-lg bg-blue-600/20 hover:bg-blue-600 group-hover:bg-blue-600 text-blue-300 group-hover:text-white flex items-center justify-center transition disabled:opacity-30 disabled:cursor-not-allowed active:scale-90"
-                          title="Add to cart"
-                        >
-                          <Plus className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
-                        </button>
+                        </div>
+                        <div className="w-8 h-8 rounded-lg bg-blue-600/20 group-hover:bg-blue-600 flex items-center justify-center text-blue-300 group-hover:text-white transition">
+                          <Plus className="w-4 h-4" />
+                        </div>
                       </div>
                     </div>
                   );
@@ -1139,21 +1133,15 @@ export const NewSalePOS: React.FC = () => {
 
               {/* See More / See Less Footer */}
               {filteredProducts.length > PAGE_SIZE && (
-                <div className="mt-4 pt-4 border-t border-slate-800/60 space-y-2">
-                  <div className="text-[10px] text-slate-500 text-center">
-                    Showing{' '}
-                    <span className="text-slate-300 font-semibold">
-                      {Math.min(visibleCount, filteredProducts.length)}
-                    </span>{' '}
-                    of{' '}
-                    <span className="text-slate-300 font-semibold">{filteredProducts.length}</span>{' '}
-                    products
+                <div className="mt-4 pt-4 border-t border-slate-800/60 max-w-2xl mx-auto flex items-center justify-between">
+                  <div className="text-[11px] text-slate-500">
+                    Showing {Math.min(visibleCount, filteredProducts.length)} of {filteredProducts.length}
                   </div>
                   <div className="flex items-center gap-2">
                     {visibleCount > PAGE_SIZE && (
                       <button
                         onClick={handleSeeLess}
-                        className="flex-1 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-300 text-[11px] font-semibold transition"
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
                       >
                         Show Less
                       </button>
@@ -1162,19 +1150,10 @@ export const NewSalePOS: React.FC = () => {
                       <button
                         onClick={handleSeeMore}
                         disabled={isLoadingMore}
-                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-[11px] font-semibold shadow transition disabled:opacity-60 disabled:cursor-wait"
+                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow transition disabled:opacity-60"
                       >
-                        {isLoadingMore ? (
-                          <>
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            <span>Loading...</span>
-                          </>
-                        ) : (
-                          <>
-                            <ChevronDown className="w-3.5 h-3.5" />
-                            <span>See More ({Math.min(PAGE_SIZE, remaining)})</span>
-                          </>
-                        )}
+                        {isLoadingMore ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                        <span>More</span>
                       </button>
                     )}
                   </div>
@@ -1245,7 +1224,6 @@ export const NewSalePOS: React.FC = () => {
           currencySymbol={settings.currencySymbol}
           onCancel={() => setVoiceDraft(null)}
           onConfirm={async payload => {
-            // 1. Prepare the sale payload
             const salePayload = {
               shopId: targetShopId === 'ALL' ? (dbState.shops[0]?.id || '') : (targetShopId || dbState.shops[0]?.id || ''),
               items: payload.items.map(i => ({
@@ -1260,24 +1238,22 @@ export const NewSalePOS: React.FC = () => {
               notes: 'Voice AI Sale',
             };
 
-            // 2. Execute the sale immediately
             if (!currentUser) return;
             setIsProcessing(true);
             
             const result = SalesService.createSale(salePayload, currentUser);
             
             setIsProcessing(false);
-            setVoiceDraft(null); // Close the preview modal
+            setVoiceDraft(null);
 
-            // 3. Handle result
             if (result.success && result.sale) {
               addToast({
                 type: 'success',
                 title: 'Sale Completed Successfully',
                 description: `Receipt #${result.sale.receiptNumber} generated via Voice AI.`,
               });
-              showReceipt(result.sale); // Show the receipt immediately
-              clearCart(); // Clear cart to avoid mixing
+              showReceipt(result.sale);
+              clearCart();
             } else {
               addToast({
                 type: 'error',

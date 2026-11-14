@@ -1,26 +1,45 @@
 // src/services/voiceSaleService.ts
-export interface SaleDraftItem {
+import { CloudflareApi } from './cloudflareApi';
+
+export interface VoiceSaleItem {
   productId: string | null;
   productName: string | null;
-  quantity: number;               // 1 by default, or spoken number
+  quantity: number;
   unitPrice: number | null;
   inStock: boolean;
   stockQty: number;
-  // Freeform attributes — populate whatever the seller said,
-  // regardless of category. { ram: "8GB", size: "XL", color: "red", ... }
   attributes: Record<string, string>;
 }
 
-export interface SaleDraft {
-  items: SaleDraftItem[];
-  saleType: 'NEW_PRODUCT_SALE';
-  paymentMethod: string | null;
-  shopId: string | null;
-}
-
-export interface ParseSaleResult {
-  draft: SaleDraft;
+export interface VoiceSaleResult {
+  draft: {
+    items: VoiceSaleItem[];
+    saleType: 'NEW_PRODUCT_SALE';
+    paymentMethod: null;
+    shopId: string | null;
+  };
   transcript: string;
   needsManualReview: boolean;
   warnings: string[];
+}
+
+export class VoiceSaleService {
+  static async parseAudio(audioBlob: Blob, shopId: string | null): Promise<VoiceSaleResult> {
+    const fd = new FormData();
+    fd.append('audio', audioBlob, 'sale.webm');
+    if (shopId) fd.append('shopId', shopId);
+
+    const token = CloudflareApi.getToken?.() ?? '';
+    const res = await fetch('/api/ai/parse-sale', {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: fd,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error((err as any).error ?? `HTTP ${res.status}`);
+    }
+    return res.json();
+  }
 }

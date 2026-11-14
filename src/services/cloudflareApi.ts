@@ -437,7 +437,7 @@ export class CloudflareApi {
     const result = await response.json();
     
     // Ensure URL uses custom R2 domain
-    if (result.url && !result.url.includes('m.gmeck.sonkosound.store')) {
+    if (result.url && !result.url.includes('m.diocres.jobsreport.online')) {
       result.url = `https://m.gmeck.sonkosound.store/${result.key}`;
     }
     

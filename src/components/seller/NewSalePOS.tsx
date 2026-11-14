@@ -222,6 +222,11 @@ export const NewSalePOS: React.FC = () => {
       return;
     }
 
+    // ✅ NEW: Auto-open the cart on mobile so the seller doesn't have to tap "Kikapu" manually
+    if (window.innerWidth < 1024) {
+      setIsMobileCartOpen(true);
+    }
+
     setCart(prev => {
       const existing = prev.find(item => item.product.id === product.id);
       const step = stepSizeForUnit(product.unit);
@@ -347,10 +352,6 @@ export const NewSalePOS: React.FC = () => {
 
         setIsParsingVoice(true);
         try {
-          // Resolve the best available auth token.
-          // The Worker currently only checks the "Bearer " prefix, so any
-          // non-empty identifier works. Once it verifies JWTs for real, this
-          // chain will pick up the signed token automatically.
           const authToken =
             (CloudflareApi as any).getToken?.() ??
             (currentUser as any)?.token ??
@@ -1244,27 +1245,46 @@ export const NewSalePOS: React.FC = () => {
           currencySymbol={settings.currencySymbol}
           onCancel={() => setVoiceDraft(null)}
           onConfirm={async payload => {
-            addDraftToCart(
-              payload.items.map((i, idx) => ({
+            // 1. Prepare the sale payload
+            const salePayload = {
+              shopId: targetShopId === 'ALL' ? (dbState.shops[0]?.id || '') : (targetShopId || dbState.shops[0]?.id || ''),
+              items: payload.items.map(i => ({
                 productId: i.productId,
-                productName: null,
                 quantity: i.quantity,
-                unit: voiceDraft?.draft.items[idx]?.unit ?? null,
                 unitPrice: i.unitPrice,
-                inStock: true,
-                stockQty: 0,
-                attributes: {},
-              }))
-            );
-            if (payload.paymentMethod) {
-              setPaymentMethod(payload.paymentMethod as PaymentMethod);
+                discount: 0,
+              })),
+              paymentMethod: payload.paymentMethod as PaymentMethod,
+              discount: 0,
+              amountReceived: payload.items.reduce((sum, i) => sum + (i.unitPrice * i.quantity), 0),
+              notes: 'Voice AI Sale',
+            };
+
+            // 2. Execute the sale immediately
+            if (!currentUser) return;
+            setIsProcessing(true);
+            
+            const result = SalesService.createSale(salePayload, currentUser);
+            
+            setIsProcessing(false);
+            setVoiceDraft(null); // Close the preview modal
+
+            // 3. Handle result
+            if (result.success && result.sale) {
+              addToast({
+                type: 'success',
+                title: 'Sale Completed Successfully',
+                description: `Receipt #${result.sale.receiptNumber} generated via Voice AI.`,
+              });
+              showReceipt(result.sale); // Show the receipt immediately
+              clearCart(); // Clear cart to avoid mixing
+            } else {
+              addToast({
+                type: 'error',
+                title: 'Voice Sale Failed',
+                description: result.error || 'Could not complete transaction.',
+              });
             }
-            setVoiceDraft(null);
-            addToast({
-              type: 'success',
-              title: 'Added to cart',
-              description: 'Review the cart and tap Kamilisha Mauzo to complete.',
-            });
           }}
         />
       )}

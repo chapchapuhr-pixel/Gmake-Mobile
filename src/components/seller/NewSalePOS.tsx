@@ -1,3 +1,4 @@
+// src/components/NewSalePOS.tsx
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   Search,
@@ -18,6 +19,8 @@ import {
   AlertTriangle,
   Loader2,
   TrendingUp,
+  Mic,
+  Square,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { SalesService } from '../../services/salesService';
@@ -25,14 +28,16 @@ import { Product, PaymentMethod } from '../../types';
 import { formatCurrency } from '../../utils/formatters';
 import { ProductThumbnail } from '../common/ProductThumbnail';
 import { ProductImageViewerModal } from '../common/ProductImageViewerModal';
+import { VoiceSaleService, VoiceSaleResult, VoiceSaleItem } from '../../services/voiceSaleService';
+import { VoiceSalePreview } from './VoiceSalePreview';
 
 const PAGE_SIZE = 15;
 
 // ─────────────────────────────────────────────────────────────
 // Unit helpers — detect if a product is sold by decimal measure
-// (kg, g, liter, ml, meter) vs. discrete pieces.
+// (kg, g, liter, ml, meter, sentimita) vs. discrete pieces.
 // ─────────────────────────────────────────────────────────────
-const DECIMAL_UNIT_REGEX = /(kg|kilogram|g\b|gram|liter|litre|^l$|\bl\b|ml|milliliter|millilitre|meter|metre|^m$|\bm\b|oz|lb)/i;
+const DECIMAL_UNIT_REGEX = /(kg|kilogram|g\b|gram|liter|litre|^l$|\bl\b|ml|milliliter|millilitre|meter|mita|metre|^m$|\bm\b|sentimita|cm|oz|lb)/i;
 
 const isDecimalUnit = (unit?: string): boolean => {
   if (!unit) return false;
@@ -65,6 +70,14 @@ export const NewSalePOS: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
+
+  // Voice sale state
+  const [isRecording, setIsRecording] = useState(false);
+  const [isParsingVoice, setIsParsingVoice] = useState(false);
+  const [voiceDraft, setVoiceDraft] = useState<VoiceSaleResult | null>(null);
+  const [voiceWarning, setVoiceWarning] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
 
   // Pagination
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
@@ -244,6 +257,145 @@ export const NewSalePOS: React.FC = () => {
     });
   };
 
+  // ─────────────────────────────────────────────────────────────
+  // Voice → Cart batch add
+  // Merges into existing lines, honors stock caps and decimal units.
+  // ─────────────────────────────────────────────────────────────
+  const addDraftToCart = (items: VoiceSaleItem[]) => {
+    const warnings: string[] = [];
+
+    setCart(prev => {
+      const next = [...prev];
+
+      for (const it of items) {
+        const product = it.productId
+          ? products.find(p => p.id === it.productId)
+          : products.find(
+              p => p.name.toLowerCase() === (it.productName ?? '').toLowerCase()
+            );
+
+        if (!product) {
+          warnings.push(`"${it.productName ?? 'item'}" not found — skipped`);
+          continue;
+        }
+        if (product.currentStock <= 0) {
+          warnings.push(`"${product.name}" is out of stock`);
+          continue;
+        }
+
+        const minQty = minQtyForUnit(product.unit);
+        const requested = it.quantity > 0 ? it.quantity : 1;
+        const safeQty = Math.min(Math.max(requested, minQty), product.currentStock);
+        if (safeQty < requested) {
+          warnings.push(
+            `Only ${product.currentStock} ${product.unit} of ${product.name} in stock (asked ${requested})`
+          );
+        }
+
+        const existingIdx = next.findIndex(c => c.product.id === product.id);
+        if (existingIdx >= 0) {
+          const merged = round3(qtyNum(next[existingIdx].quantity) + safeQty);
+          const capped = Math.min(merged, product.currentStock);
+          next[existingIdx] = {
+            ...next[existingIdx],
+            quantity: capped,
+            unitPrice: it.unitPrice ?? next[existingIdx].unitPrice,
+          };
+        } else {
+          next.push({
+            product,
+            quantity: round3(safeQty),
+            unitPrice: it.unitPrice ?? product.sellingPrice,
+            discount: 0,
+          });
+        }
+      }
+
+      return next;
+    });
+
+    if (warnings.length) {
+      setVoiceWarning(warnings.join(' • '));
+      setTimeout(() => setVoiceWarning(null), 6000);
+    }
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // Voice recording
+  // ─────────────────────────────────────────────────────────────
+  const startVoiceRecording = async () => {
+    setVoiceWarning(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+        ? 'audio/mp4'
+        : 'audio/webm';
+      const rec = new MediaRecorder(stream, { mimeType: mime });
+      chunksRef.current = [];
+
+      rec.ondataavailable = e => e.data.size > 0 && chunksRef.current.push(e.data);
+      rec.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(chunksRef.current, { type: mime });
+        if (blob.size === 0) {
+          addToast({ type: 'warning', title: 'No audio captured' });
+          return;
+        }
+
+        setIsParsingVoice(true);
+        try {
+          const result = await VoiceSaleService.parseAudio(blob, targetShopId || null);
+
+          if (!result.draft.items.length) {
+            addToast({
+              type: 'error',
+              title: 'Could not understand',
+              description: 'Try again and mention the product name and price.',
+            });
+            return;
+          }
+
+          addToast({
+            type: 'info',
+            title: 'Voice sale parsed',
+            description:
+              result.transcript.length > 90
+                ? result.transcript.slice(0, 90) + '…'
+                : result.transcript,
+          });
+
+          setVoiceDraft(result);
+        } catch (err: any) {
+          addToast({
+            type: 'error',
+            title: 'Voice processing failed',
+            description: err.message ?? 'Please try again.',
+          });
+        } finally {
+          setIsParsingVoice(false);
+        }
+      };
+
+      rec.start();
+      recorderRef.current = rec;
+      setIsRecording(true);
+    } catch {
+      addToast({
+        type: 'error',
+        title: 'Microphone blocked',
+        description: 'Grant microphone permission to use voice sales.',
+      });
+    }
+  };
+
+  const stopVoiceRecording = () => {
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+    setIsRecording(false);
+  };
+
   const updateUnitPrice = (productId: string, rawValue: string) => {
     if (rawValue === '') {
       setCart(prev =>
@@ -287,7 +439,6 @@ export const NewSalePOS: React.FC = () => {
     const item = cart.find(i => i.product.id === productId);
     if (!item) return;
 
-    // Allow blank while editing
     if (rawValue === '') {
       setCart(prev =>
         prev.map(i => (i.product.id === productId ? { ...i, quantity: '' } : i))
@@ -295,7 +446,6 @@ export const NewSalePOS: React.FC = () => {
       return;
     }
 
-    // Allow partial decimal input like "1." or "0."
     if (rawValue === '.' || rawValue.endsWith('.')) {
       if (/^\d*\.?\d*$/.test(rawValue)) {
         setCart(prev =>
@@ -305,7 +455,6 @@ export const NewSalePOS: React.FC = () => {
       return;
     }
 
-    // Reject anything that isn't a valid positive number pattern
     if (!/^\d*\.?\d*$/.test(rawValue)) return;
 
     const parsed = parseFloat(rawValue);
@@ -320,7 +469,6 @@ export const NewSalePOS: React.FC = () => {
     let nextQty = parsed;
 
     if (nextQty < minQty) {
-      // Keep raw string if user is mid-typing (e.g. "0" before ".25")
       setCart(prev =>
         prev.map(i => (i.product.id === productId ? { ...i, quantity: rawValue } : i))
       );
@@ -419,7 +567,6 @@ export const NewSalePOS: React.FC = () => {
       return;
     }
 
-    // Validate quantity against unit-specific minimum
     const invalid = cart.find(i => {
       const q = qtyNum(i.quantity);
       return q < minQtyForUnit(i.product.unit);
@@ -530,7 +677,7 @@ export const NewSalePOS: React.FC = () => {
             <ShoppingCart className="w-12 h-12 mb-3 text-slate-700" />
             <p className="text-sm font-semibold text-slate-400">Cart is Empty</p>
             <p className="text-xs text-slate-600 mt-1">
-              Tap product cards or scan barcodes to begin sale.
+              Tap product cards, scan barcodes, or tap the mic to begin.
             </p>
           </div>
         ) : (
@@ -764,6 +911,27 @@ export const NewSalePOS: React.FC = () => {
               />
             </div>
 
+            {/* Voice Sale mic button */}
+            <button
+              type="button"
+              onClick={isRecording ? stopVoiceRecording : startVoiceRecording}
+              disabled={isParsingVoice}
+              title={isRecording ? 'Stop recording' : 'Speak the sale'}
+              className={`p-2 rounded-xl border transition active:scale-95 disabled:opacity-50 shrink-0 ${
+                isRecording
+                  ? 'bg-rose-600 border-rose-500 text-white animate-pulse'
+                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+              }`}
+            >
+              {isParsingVoice ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : isRecording ? (
+                <Square className="w-4 h-4" />
+              ) : (
+                <Mic className="w-4 h-4" />
+              )}
+            </button>
+
             <button
               onClick={() => setShowMobileBarcode(!showMobileBarcode)}
               className="lg:hidden p-2 rounded-xl bg-slate-800 text-slate-300 border border-slate-700 hover:text-white"
@@ -803,6 +971,20 @@ export const NewSalePOS: React.FC = () => {
                 Scan
               </button>
             </form>
+          )}
+
+          {/* Voice warning banner */}
+          {voiceWarning && (
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[11px] animate-in fade-in">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <span className="flex-1">{voiceWarning}</span>
+              <button
+                onClick={() => setVoiceWarning(null)}
+                className="text-amber-400 hover:text-amber-200 shrink-0"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
           )}
 
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 text-xs">
@@ -1037,6 +1219,39 @@ export const NewSalePOS: React.FC = () => {
         onClose={() => setIsViewerOpen(false)}
         currencySymbol={settings.currencySymbol}
       />
+
+      {/* Voice Sale Preview Modal */}
+      {voiceDraft && (
+        <VoiceSalePreview
+          result={voiceDraft}
+          defaultPaymentMethod={paymentMethod}
+          currencySymbol={settings.currencySymbol}
+          onCancel={() => setVoiceDraft(null)}
+          onConfirm={async payload => {
+            addDraftToCart(
+              payload.items.map(i => ({
+                productId: i.productId,
+                productName: null,
+                quantity: i.quantity,
+                unit: null,
+                unitPrice: i.unitPrice,
+                inStock: true,
+                stockQty: 0,
+                attributes: {},
+              }))
+            );
+            if (payload.paymentMethod) {
+              setPaymentMethod(payload.paymentMethod as PaymentMethod);
+            }
+            setVoiceDraft(null);
+            addToast({
+              type: 'success',
+              title: 'Added to cart',
+              description: 'Review the cart and tap Kamilisha Mauzo to complete.',
+            });
+          }}
+        />
+      )}
     </div>
   );
 };

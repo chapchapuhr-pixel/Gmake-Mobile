@@ -936,8 +936,8 @@ export const NewSalePOS: React.FC = () => {
               title={isRecording ? 'Stop recording' : 'Speak the sale'}
               className={`p-2 rounded-xl border transition active:scale-95 disabled:opacity-50 shrink-0 ${
                 isRecording
-                  ? 'bg-rose-600 border-rose-500 text-white animate-pulse'
-                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+                  ? 'bg-blue-500 border-blue-300 text-white animate-pulse ring-2 ring-blue-400/50 shadow-lg shadow-blue-500/30'
+                  : 'bg-blue-600 hover:bg-blue-500 border-blue-500 text-white shadow-sm shadow-blue-500/20'
               }`}
             >
               {isParsingVoice ? (

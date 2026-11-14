@@ -88,7 +88,11 @@ export class ProductService {
       const img = images[i];
 
       // Skip if already synced with R2 URL
-      if (img.syncStatus === 'SYNCED' && img.dataUrl.includes('m.diocres.jobsreport.online')) {
+      if (
+        img.syncStatus === 'SYNCED' &&
+        (img.dataUrl.includes('m.gmeck.sonkosound.store') ||
+          img.dataUrl.includes('m.diocres.jobsreport.online'))
+      ) {
         uploadedImages.push(img);
         continue;
       }

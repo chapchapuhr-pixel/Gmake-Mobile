@@ -25,7 +25,7 @@ export class CloudflareApi {
   }
 
   static getR2BaseUrl(): string {
-    return 'https://m.diocres.jobsreport.online';
+    return 'https://m.gmeck.sonkosound.store';
   }
 
   static setToken(token: string): void {
@@ -437,7 +437,7 @@ export class CloudflareApi {
     const result = await response.json();
     
     // Ensure URL uses custom R2 domain
-    if (result.url && !result.url.includes('m.diocres.jobsreport.online')) {
+    if (result.url && !result.url.includes('m.gmeck.sonkosound.store')) {
       result.url = `https://m.gmeck.sonkosound.store/${result.key}`;
     }
     

@@ -17,7 +17,7 @@ import {
   TrendingUp,
   ShieldCheck,
 } from 'lucide-react';
-import { ParseSaleResult, SaleDraftItem } from '../services/voiceSaleService';
+import { VoiceSaleResult, VoiceSaleItem } from '../services/voiceSaleService';
 import { formatCurrency } from '../utils/formatters';
 
 const PAYMENT_METHODS = [
@@ -28,7 +28,7 @@ const PAYMENT_METHODS = [
 ] as const;
 
 interface Props {
-  result: ParseSaleResult;
+  result: VoiceSaleResult;
   defaultPaymentMethod?: string;
   currencySymbol?: string;
   onConfirm: (payload: {
@@ -51,7 +51,7 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 
 // Per-item health color
 type ItemHealth = 'ok' | 'review' | 'blocked';
-const getHealth = (it: SaleDraftItem): ItemHealth => {
+const getHealth = (it: VoiceSaleItem): ItemHealth => {
   if (!it.productId) return 'blocked';
   if (!it.inStock) return 'blocked';
   if (!it.unitPrice || it.unitPrice <= 0) return 'review';
@@ -75,11 +75,11 @@ export const VoiceSalePreview: React.FC<Props> = ({
   onConfirm,
   onCancel,
 }) => {
-  const [items, setItems] = useState<SaleDraftItem[]>(result.draft.items);
+  const [items, setItems] = useState<VoiceSaleItem[]>(result.draft.items);
   const [paymentMethod, setPaymentMethod] = useState(defaultPaymentMethod);
   const [saving, setSaving] = useState(false);
 
-  const update = (i: number, patch: Partial<SaleDraftItem>) =>
+  const update = (i: number, patch: Partial<VoiceSaleItem>) =>
     setItems(arr => arr.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
 
   const remove = (i: number) =>

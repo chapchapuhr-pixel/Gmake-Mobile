@@ -29,7 +29,7 @@ import { formatCurrency } from '../../utils/formatters';
 import { ProductThumbnail } from '../common/ProductThumbnail';
 import { ProductImageViewerModal } from '../common/ProductImageViewerModal';
 import { VoiceSaleService, VoiceSaleResult, VoiceSaleItem } from '../../services/voiceSaleService';
-import { VoiceSalePreview } from './VoiceSalePreview';
+import { VoiceSalePreview } from '../VoiceSalePreview';
 
 const PAGE_SIZE = 15;
 

@@ -13,11 +13,23 @@ interface Env {
 
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
 
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Device-ID',
+  'Access-Control-Max-Age': '86400',
+};
+
 function json(b: unknown, s = 200) {
   return new Response(JSON.stringify(b), {
-    status: s, headers: { 'Content-Type': 'application/json' },
+    status: s,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders },
   });
 }
+
+export const onRequestOptions: PagesFunction<Env> = async () => {
+  return new Response(null, { status: 204, headers: corsHeaders });
+};
 
 // ── 1. Transcribe ──────────────────────────────────────────────
 async function transcribe(env: Env, audio: File): Promise<string> {
@@ -109,7 +121,7 @@ async function matchProduct(
 
   // Pass 1: substring match
   let row = await env.DB.prepare(
-    `SELECT id, name, selling_price, stock_qty, category, shop_id, attributes, unit
+    `SELECT id, name, selling_price, current_stock, category_id, shop_id, unit
        FROM products
       WHERE status = 'ACTIVE' ${shopClause}
         AND LOWER(name) LIKE LOWER(?)
@@ -123,7 +135,7 @@ async function matchProduct(
     if (tokens.length) {
       const clauses = tokens.map(() => 'LOWER(name) LIKE ?').join(' AND ');
       row = await env.DB.prepare(
-        `SELECT id, name, selling_price, stock_qty, category, shop_id, attributes, unit
+        `SELECT id, name, selling_price, current_stock, category_id, shop_id, unit
            FROM products
           WHERE status = 'ACTIVE' ${shopClause} AND ${clauses}
           LIMIT 1`
@@ -210,7 +222,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
         const price = parseSwahiliPrice(it.priceText ?? '');
 
         // Stock checks use decimal-aware comparison
-        const stock = Number(row?.stock_qty ?? 0);
+        const stock = Number(row?.current_stock ?? 0);
         const inStock = !!row && stock >= qty;
 
         if (!row) warnings.push(`Product not found: "${it.productName}"`);

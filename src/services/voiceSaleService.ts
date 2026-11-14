@@ -125,9 +125,10 @@ export class VoiceSaleService {
     const headers: HeadersInit = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
+    const baseUrl = CloudflareApi.getBaseUrl().replace(/\/+$/, '');
     let res: Response;
     try {
-      res = await fetch('/api/ai/parse-sale', {
+      res = await fetch(`${baseUrl}/api/ai/parse-sale`, {
         method: 'POST',
         headers,
         body: fd,

@@ -1,5 +1,10 @@
 // functions/api/ai/parse-sale.ts
-import { parseSwahiliPrice, parseQuantity } from './numbers';
+import {
+  parseSwahiliPrice,
+  parseQuantity,
+  parseSpokenQuantity,
+  isDecimalUnit,
+} from './numbers';
 
 interface Env {
   DB: D1Database;
@@ -40,9 +45,9 @@ Return ONLY JSON:
   "items": [
     {
       "productName": string,
-      "quantityText": string,          // RAW phrase: "mbili", "2", "" if not mentioned
-      "priceText": string,             // RAW price phrase: "laki nne na hamsini", "450,000"
-      "attributes": { "<key>": "<value>" }   // any specs mentioned (ram, size, color, weight, model...)
+      "quantityText": string,          // RAW phrase, verbatim from speech
+      "priceText": string,             // RAW price phrase
+      "attributes": { "<key>": "<value>" }
     }
   ],
   "confidence": number  // 0..1
@@ -50,8 +55,16 @@ Return ONLY JSON:
 
 Rules:
 - Support MULTIPLE items if the seller lists several products in one sentence.
-- quantityText: return "" when not spoken. Never invent a quantity.
+- quantityText: return the RAW quantity phrase the seller said, verbatim.
+  Examples: "moja na nusu", "robo tatu", "1.5", "mita moja na nusu",
+  "lita mbili na robo", "kilo tatu", "vitano".
+  If the seller says a measurement + unit (e.g. "mita moja na nusu"),
+  include BOTH the number phrase and the unit in quantityText.
+  Do NOT convert fractions to decimals — the server does that.
+  Return "" only when no quantity or measurement is mentioned at all.
+  Never invent a quantity.
 - priceText: return the raw phrase. Do NOT compute the number.
+  Examples: "laki nne na hamsini", "450,000", "elfu tatu".
 - attributes: only what the seller actually said. Keys are freeform.
   Examples: {"ram":"8GB"}, {"size":"XL"}, {"color":"red"}, {"weight":"2kg"}.
 - Never add a payment method or "sold" status.
@@ -89,7 +102,6 @@ async function matchProduct(
   const needle = name.trim();
   if (!needle) return null;
 
-  // Build shop-scoped query. If no shops assigned, don't filter (admin fallback).
   const placeholders = shopIds.map(() => '?').join(',');
   const shopClause = shopIds.length
     ? `AND shop_id IN (${placeholders})`
@@ -97,7 +109,7 @@ async function matchProduct(
 
   // Pass 1: substring match
   let row = await env.DB.prepare(
-    `SELECT id, name, selling_price, stock_qty, category, shop_id, attributes
+    `SELECT id, name, selling_price, stock_qty, category, shop_id, attributes, unit
        FROM products
       WHERE status = 'ACTIVE' ${shopClause}
         AND LOWER(name) LIKE LOWER(?)
@@ -111,7 +123,7 @@ async function matchProduct(
     if (tokens.length) {
       const clauses = tokens.map(() => 'LOWER(name) LIKE ?').join(' AND ');
       row = await env.DB.prepare(
-        `SELECT id, name, selling_price, stock_qty, category, shop_id, attributes
+        `SELECT id, name, selling_price, stock_qty, category, shop_id, attributes, unit
            FROM products
           WHERE status = 'ACTIVE' ${shopClause} AND ${clauses}
           LIMIT 1`
@@ -121,15 +133,45 @@ async function matchProduct(
   return row ?? null;
 }
 
-// ── 4. Main handler ────────────────────────────────────────────
+// ── 4. Quantity resolution helper ──────────────────────────────
+/**
+ * Given a spoken quantity phrase + the matched product's unit,
+ * return a decimal quantity. Falls back to recovering from the
+ * transcript only when the phrase is empty AND the unit is measured.
+ */
+function resolveQuantity(
+  quantityText: string | undefined,
+  productUnit: string | null | undefined,
+  transcript: string
+): number {
+  const raw = (quantityText ?? '').trim();
+
+  // Normal path — parser handles fractions, decimals, and noun-class
+  // prefixes ("vitano", "mita moja na nusu") deterministically.
+  if (raw) {
+    const parsed = parseQuantity(raw, 1);
+    if (parsed !== 1 || /moja|1\b/.test(raw)) return parsed;
+    // If parseQuantity returned the fallback 1 but the phrase is not
+    // actually "1", keep trying other recovery paths below.
+  }
+
+  // Measured goods: if the LLM forgot quantityText, try to recover
+  // from the raw transcript (e.g. "mita moja na nusu" → 1.5).
+  if (isDecimalUnit(productUnit ?? '')) {
+    const recovered = parseSpokenQuantity(transcript);
+    if (recovered !== null) return recovered;
+  }
+
+  // Default: 1 (pieces)
+  return 1;
+}
+
+// ── 5. Main handler ────────────────────────────────────────────
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   try {
     const auth = request.headers.get('Authorization') ?? '';
     if (!auth.startsWith('Bearer ')) return json({ error: 'Unauthorized' }, 401);
 
-    // The frontend sends shop context so we scope the match correctly.
-    // (Derived from the seller's assignedShopIds on the client, but verified
-    //  server-side against the users table below.)
     const form = await request.formData();
     const audio = form.get('audio');
     if (!(audio instanceof File) || audio.size === 0) {
@@ -138,7 +180,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     const requestedShopId = (form.get('shopId') as string | null) || null;
 
     // TODO: verify the caller's assignedShopIds from the users table.
-    // For now we trust the token + requestedShopId.
     const shopIds: string[] = requestedShopId ? [requestedShopId] : [];
 
     // 1. Transcribe
@@ -161,25 +202,46 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
     const items = await Promise.all(
       rawItems.map(async (it) => {
-        const qty = parseQuantity(it.quantityText);
-        const price = parseSwahiliPrice(it.priceText ?? '');
         const row = await matchProduct(env, it.productName ?? '', shopIds);
+        const productUnit: string | null = row?.unit ?? null;
+
+        // Fraction-aware quantity, with measured-unit recovery
+        const qty = resolveQuantity(it.quantityText, productUnit, transcript);
+        const price = parseSwahiliPrice(it.priceText ?? '');
+
+        // Stock checks use decimal-aware comparison
+        const stock = Number(row?.stock_qty ?? 0);
+        const inStock = !!row && stock >= qty;
 
         if (!row) warnings.push(`Product not found: "${it.productName}"`);
         if (!price) warnings.push(`No price detected for "${it.productName}"`);
-        if (row && (row.stock_qty ?? 0) < qty) {
+        if (row && stock < qty) {
           warnings.push(
-            `Only ${row.stock_qty} in stock for "${row.name}" (asked ${qty})`
+            `Only ${stock}${productUnit ? ' ' + productUnit : ''} in stock for "${row.name}" (asked ${qty})`
+          );
+        }
+        // Sanity: measured units usually get fractional quantities; warn
+        // if the model returned a whole number for a measured product AND
+        // the transcript contains a fraction word — helps catch mistakes.
+        if (
+          row &&
+          isDecimalUnit(productUnit ?? '') &&
+          Number.isInteger(qty) &&
+          /nusu|robo|theluthi/i.test(transcript)
+        ) {
+          warnings.push(
+            `Quantity for "${row.name}" may be fractional — please double-check (${qty} ${productUnit})`
           );
         }
 
         return {
           productId: row?.id ?? null,
           productName: row?.name ?? it.productName ?? null,
-          quantity: qty,
+          quantity: qty,                       // decimal preserved
+          unit: productUnit,                   // passed to UI
           unitPrice: price ?? row?.selling_price ?? null,
-          inStock: !!row && (row.stock_qty ?? 0) >= qty,
-          stockQty: row?.stock_qty ?? 0,
+          inStock,
+          stockQty: stock,
           attributes: it.attributes ?? {},
         };
       })
@@ -201,10 +263,11 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
     const confidence =
       typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
+
     const needsManualReview =
       confidence < 0.6 ||
       warnings.length > 0 ||
-      items.some(i => !i.productId || !i.unitPrice);
+      items.some(i => !i.productId || !i.unitPrice || i.quantity <= 0);
 
     return json({ draft, transcript, needsManualReview, warnings });
   } catch (err: any) {

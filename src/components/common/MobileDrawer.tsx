@@ -262,48 +262,77 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
               )}
             </div>
 
-            {isPlatformAdm || (isShopAdm && managedShops.length > 1) ? (
-              <select
-                id="drawer-admin-shop-select"
-                value={selectedShopId}
-                onChange={e => {
-                  setSelectedShopId(e.target.value);
-                }}
-                className="w-full bg-slate-950 text-xs text-white font-medium py-2 px-2.5 rounded-lg border border-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
-              >
-                <option value="ALL">
-                  {isPlatformAdm ? '🏢 All Shops (Overview)' : '🏢 All Managed Shops'}
-                </option>
-                {(isPlatformAdm ? availableShops : managedShops).map(sh => (
-                  <option key={sh.id} value={sh.id}>
-                    {sh.status === 'INACTIVE' ? `🚫 ${sh.name} (Inactive)` : `🏪 ${sh.name}`}
-                  </option>
-                ))}
-              </select>
-            ) : availableShops.length > 1 ? (
-              <select
-                id="drawer-seller-shop-select"
-                value={selectedShopId}
-                onChange={e => {
-                  setSelectedShopId(e.target.value);
-                }}
-                className="w-full bg-slate-950 text-xs text-blue-300 font-medium py-2 px-2.5 rounded-lg border border-blue-700/60 focus:outline-none focus:ring-1 focus:ring-blue-500"
-              >
-                {availableShops.map(sh => (
-                  <option key={sh.id} value={sh.id}>
-                    🏪 {sh.name}
-                  </option>
-                ))}
-              </select>
-            ) : availableShops.length === 1 ? (
-              <div className="text-xs font-semibold text-blue-300 py-1 px-1">
-                🏪 {availableShops[0].name}
-              </div>
-            ) : (
-              <div className="text-xs text-rose-400 py-1">
-                ⚠️ No Assigned Shops
-              </div>
-            )}
+            {(() => {
+              const sellerPersonalTabs = ['new_sale', 'my_sales', 'receipts', 'settings', 'notifications'];
+              const inAdminScopedTab = isShopAdm && !isPlatformAdm && !sellerPersonalTabs.includes(activeTab);
+
+              if (isPlatformAdm || (inAdminScopedTab && managedShops.length > 1)) {
+                return (
+                  <select
+                    id="drawer-admin-shop-select"
+                    value={selectedShopId}
+                    onChange={e => {
+                      setSelectedShopId(e.target.value);
+                    }}
+                    className="w-full bg-slate-950 text-xs text-white font-medium py-2 px-2.5 rounded-lg border border-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  >
+                    <option value="ALL">
+                      {isPlatformAdm ? '🏢 All Shops (Overview)' : '🏢 All Managed Shops'}
+                    </option>
+                    {(isPlatformAdm ? availableShops : managedShops).map(sh => (
+                      <option key={sh.id} value={sh.id}>
+                        {sh.status === 'INACTIVE' ? `🚫 ${sh.name} (Inactive)` : `🏪 ${sh.name}`}
+                      </option>
+                    ))}
+                  </select>
+                );
+              }
+
+              if (inAdminScopedTab) {
+                return managedShops.length === 1 ? (
+                  <div className="text-xs font-semibold text-emerald-300 py-1 px-1">
+                    🏪 {managedShops[0].name}
+                  </div>
+                ) : (
+                  <div className="text-xs text-rose-400 py-1">
+                    ⚠️ No Managed Shops
+                  </div>
+                );
+              }
+
+              if (availableShops.length > 1) {
+                return (
+                  <select
+                    id="drawer-seller-shop-select"
+                    value={selectedShopId}
+                    onChange={e => {
+                      setSelectedShopId(e.target.value);
+                    }}
+                    className="w-full bg-slate-950 text-xs text-blue-300 font-medium py-2 px-2.5 rounded-lg border border-blue-700/60 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  >
+                    {availableShops.map(sh => (
+                      <option key={sh.id} value={sh.id}>
+                        🏪 {sh.name}
+                      </option>
+                    ))}
+                  </select>
+                );
+              }
+
+              if (availableShops.length === 1) {
+                return (
+                  <div className="text-xs font-semibold text-blue-300 py-1 px-1">
+                    🏪 {availableShops[0].name}
+                  </div>
+                );
+              }
+
+              return (
+                <div className="text-xs text-rose-400 py-1">
+                  ⚠️ No Assigned Shops
+                </div>
+              );
+            })()}
           </div>
         </div>
 

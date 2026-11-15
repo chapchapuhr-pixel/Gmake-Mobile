@@ -288,29 +288,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [currentUser]);
 
-  // Ensure seller (and single-shop Shop Admin) has a valid shop selected
+  // Ensure seller and Shop Admin stay on a valid shop (and lock admin/report tabs strictly to managedShopIds)
   useEffect(() => {
     if (!currentUser) return;
 
     if (currentUser.role === 'SELLER') {
       const managedIds = getShopAdminShopIds(currentUser);
-      const sellerShops = (dbState.shops || []).filter(
-        s =>
-          managedIds.includes(s.id) ||
-          (s.status === 'ACTIVE' && (currentUser.assignedShopIds || []).includes(s.id))
-      );
+      const isShopAdm = managedIds.length > 0;
+      const sellerPersonalTabs = ['new_sale', 'my_sales', 'receipts', 'settings', 'notifications'];
+      const inAdminScopedTab = isShopAdm && !sellerPersonalTabs.includes(activeTab);
 
-      if (sellerShops.length > 0) {
-        const allowAllOverview = managedIds.length > 1;
+      const scopedShops = inAdminScopedTab
+        ? (dbState.shops || []).filter(s => managedIds.includes(s.id))
+        : (dbState.shops || []).filter(
+            s =>
+              managedIds.includes(s.id) ||
+              (s.status === 'ACTIVE' && (currentUser.assignedShopIds || []).includes(s.id))
+          );
+
+      if (scopedShops.length > 0) {
+        const allowAllOverview = inAdminScopedTab ? managedIds.length > 1 : false;
         const isCurrentValid =
           (allowAllOverview && selectedShopId === 'ALL') ||
-          sellerShops.some(s => s.id === selectedShopId);
+          scopedShops.some(s => s.id === selectedShopId);
         if (!isCurrentValid || (!allowAllOverview && selectedShopId === 'ALL')) {
-          setSelectedShopId(sellerShops[0].id);
+          setSelectedShopId(scopedShops[0].id);
         }
       }
     }
-  }, [currentUser, dbState.shops, selectedShopId]);
+  }, [currentUser, dbState.shops, selectedShopId, activeTab]);
 
   const refreshUser = () => {
     const u = AuthService.getActiveUser();

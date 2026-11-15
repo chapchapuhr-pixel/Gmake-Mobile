@@ -68,10 +68,10 @@ export class SellerService {
       return { success: false, error: `Username '${cleanUsername}' is already taken.` };
     }
 
-    // Scope shop assignments & permissions when created by a Shop Admin
+    // Scope shop assignments & permissions when created by a Shop Admin or delegated seller
     let finalAssignedShopIds: string[] =
       params.assignedShopIds && params.assignedShopIds.length > 0 ? [...params.assignedShopIds] : [];
-    let finalPermissions: SellerPermissions = { ...(params.permissions || {}) };
+    const finalPermissions: SellerPermissions = platformAdmin ? { ...(params.permissions || {}) } : {};
 
     if (!platformAdmin) {
       if (shopAdmin) {
@@ -82,9 +82,6 @@ export class SellerService {
         const scoped = finalAssignedShopIds.filter(id => callerShops.includes(id));
         finalAssignedShopIds = scoped.length > 0 ? scoped : callerShops;
       }
-      // Only Platform Admin can appoint Shop Admins or grant shop-level admin management
-      delete finalPermissions.shopAdminShopIds;
-      finalPermissions.canManageShops = false;
     }
 
     const passwordHash = await hashPassword(params.password);
@@ -222,12 +219,9 @@ export class SellerService {
       }
     }
 
-    if (params.permissions !== undefined) {
+    if (platformAdmin && params.permissions !== undefined) {
       const preservedShopAdminIds = getShopAdminShopIds(seller);
       const nextPerms: SellerPermissions = { ...params.permissions };
-      if (!platformAdmin) {
-        nextPerms.canManageShops = seller.permissions?.canManageShops ?? false;
-      }
       if (preservedShopAdminIds.length > 0) {
         nextPerms.shopAdminShopIds = preservedShopAdminIds;
       } else {

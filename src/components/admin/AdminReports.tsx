@@ -231,17 +231,32 @@ export const AdminReports: React.FC = () => {
     (p: any) => platformAdmin || (!!p.shopId && visibleShopIdSet.has(p.shopId))
   );
 
+  const effectiveShopFilter = useMemo(() => {
+    if (platformAdmin) return shopFilter;
+    if (shopAdmin) {
+      if (shops.length <= 1) return shops[0]?.id || 'ALL';
+      if (shopFilter === 'ALL' || shops.some((s: any) => s.id === shopFilter)) {
+        return shopFilter;
+      }
+      return 'ALL';
+    }
+    if (shopFilter === 'ALL' || shops.some((s: any) => s.id === shopFilter)) {
+      return shopFilter;
+    }
+    return shops[0]?.id || 'ALL';
+  }, [platformAdmin, shopAdmin, shops, shopFilter]);
+
   const incomeRange = useMemo(() => computeRange(incomePeriod, incomeStart, incomeEnd), [incomePeriod, incomeStart, incomeEnd]);
   const deviationRange = useMemo(() => computeRange(deviationPeriod, deviationStart, deviationEnd), [deviationPeriod, deviationStart, deviationEnd]);
   const shopRange = useMemo(() => computeRange(shopPeriod, shopStart, shopEnd), [shopPeriod, shopStart, shopEnd]);
   const productRange = useMemo(() => computeRange(productPeriod, productStart, productEnd), [productPeriod, productStart, productEnd]);
   const sellerRange = useMemo(() => computeRange(sellerPeriod, sellerStart, sellerEnd), [sellerPeriod, sellerStart, sellerEnd]);
 
-  const incomeSummary = useMemo(() => ReportService.getFinancialSummary(incomeRange, { shopId: shopFilter }, currentUser) || {}, [incomeRange, currentUser, dbState, shopFilter]);
-  const shopSummary = useMemo(() => ReportService.getFinancialSummary(shopRange, { shopId: shopFilter }, currentUser) || {}, [shopRange, currentUser, dbState, shopFilter]);
-  const productSummary = useMemo(() => ReportService.getFinancialSummary(productRange, { shopId: shopFilter }, currentUser) || {}, [productRange, currentUser, dbState, shopFilter]);
-  const sellerSummary = useMemo(() => ReportService.getFinancialSummary(sellerRange, { shopId: shopFilter }, currentUser) || {}, [sellerRange, currentUser, dbState, shopFilter]);
-  const deviationSummary = useMemo(() => ReportService.getFinancialSummary(deviationRange, { shopId: shopFilter }, currentUser) || {}, [deviationRange, currentUser, dbState, shopFilter]);
+  const incomeSummary = useMemo(() => ReportService.getFinancialSummary(incomeRange, { shopId: effectiveShopFilter }, currentUser) || {}, [incomeRange, currentUser, dbState, effectiveShopFilter]);
+  const shopSummary = useMemo(() => ReportService.getFinancialSummary(shopRange, { shopId: effectiveShopFilter }, currentUser) || {}, [shopRange, currentUser, dbState, effectiveShopFilter]);
+  const productSummary = useMemo(() => ReportService.getFinancialSummary(productRange, { shopId: effectiveShopFilter }, currentUser) || {}, [productRange, currentUser, dbState, effectiveShopFilter]);
+  const sellerSummary = useMemo(() => ReportService.getFinancialSummary(sellerRange, { shopId: effectiveShopFilter }, currentUser) || {}, [sellerRange, currentUser, dbState, effectiveShopFilter]);
+  const deviationSummary = useMemo(() => ReportService.getFinancialSummary(deviationRange, { shopId: effectiveShopFilter }, currentUser) || {}, [deviationRange, currentUser, dbState, effectiveShopFilter]);
 
   const filteredProducts = useMemo(() => {
     const list = (productSummary as any).topProducts || [];
@@ -258,13 +273,13 @@ export const AdminReports: React.FC = () => {
   }, [sellerSummary, sellerSearch]);
 
   const selectedShopName =
-    shopFilter === 'ALL'
+    effectiveShopFilter === 'ALL'
       ? shopAdmin && !platformAdmin
         ? shops.length === 1
           ? shops[0].name
           : 'All Managed Shops'
         : 'All Shops'
-      : shops.find((s: any) => s.id === shopFilter)?.name || 'Unknown';
+      : shops.find((s: any) => s.id === effectiveShopFilter)?.name || 'Unknown';
 
   // ─────────────────────────────────────────────────────────────
   // Deviations — snapshot-first, below-cost detection, no silent skips
@@ -679,19 +694,27 @@ export const AdminReports: React.FC = () => {
           </p>
         </div>
 
-        <select
-          value={shopFilter}
-          onChange={e => setShopFilter(e.target.value)}
-          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-        >
-          <option value="ALL">
-            🏪 {shopAdmin && !platformAdmin ? (shops.length === 1 ? shops[0].name : 'All Managed Shops') : 'All Shops'}
-          </option>
-          {(platformAdmin || shops.length > 1) &&
-            shops.map((s: any) => (
+        {shopAdmin && !platformAdmin && shops.length <= 1 ? (
+          <div className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 flex items-center justify-between gap-2">
+            <span className="truncate font-medium">🏪 {shops[0]?.name || 'No Managed Shop'}</span>
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold shrink-0">
+              Shop Admin Report
+            </span>
+          </div>
+        ) : (
+          <select
+            value={effectiveShopFilter}
+            onChange={e => setShopFilter(e.target.value)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
+          >
+            <option value="ALL">
+              🏪 {shopAdmin && !platformAdmin ? 'All Managed Shops' : 'All Shops'}
+            </option>
+            {shops.map((s: any) => (
               <option key={s.id} value={s.id}>🏪 {s.name}</option>
             ))}
-        </select>
+          </select>
+        )}
 
         <div className="flex items-center gap-2">
           <button

@@ -27,6 +27,22 @@ export const AdminDashboard: React.FC = () => {
   const platformAdmin = isPlatformAdmin(currentUser);
   const shopAdm = isShopAdmin(currentUser);
   const managedShopIds = getShopAdminShopIds(currentUser);
+  const managedShops = (dbState.shops || []).filter(s => managedShopIds.includes(s.id));
+
+  const effectiveShopId = platformAdmin
+    ? selectedShopId
+    : shopAdm
+      ? managedShops.length > 1 && selectedShopId === 'ALL'
+        ? 'ALL'
+        : managedShopIds.includes(selectedShopId)
+          ? selectedShopId
+          : managedShops[0]?.id || ''
+      : selectedShopId;
+
+  const effectiveShop =
+    effectiveShopId === 'ALL'
+      ? null
+      : (dbState.shops || []).find(s => s.id === effectiveShopId) || currentShop;
 
   const settings = dbState.settings;
 
@@ -51,10 +67,10 @@ export const AdminDashboard: React.FC = () => {
   const summary = useMemo(() => {
     return ReportService.getFinancialSummary(
       dateRange,
-      { shopId: selectedShopId },
+      { shopId: effectiveShopId },
       currentUser
     );
-  }, [dateRange, selectedShopId, currentUser, dbState]);
+  }, [dateRange, effectiveShopId, currentUser, dbState]);
 
   // Inventory stats filtered by managed shops and selected shop
   const lowStockProducts = (dbState.products || []).filter(
@@ -62,12 +78,12 @@ export const AdminDashboard: React.FC = () => {
       p.status === 'ACTIVE' &&
       p.currentStock <= p.minStock &&
       (platformAdmin || managedShopIds.includes(p.shopId)) &&
-      (!selectedShopId || selectedShopId === 'ALL' || p.shopId === selectedShopId)
+      (!effectiveShopId || effectiveShopId === 'ALL' || p.shopId === effectiveShopId)
   );
 
-  const shopScopeLabel = selectedShopId === 'ALL' 
+  const shopScopeLabel = effectiveShopId === 'ALL'
     ? (platformAdmin ? 'Company Overview (All Shops)' : 'All Managed Shops')
-    : currentShop?.name || 'Selected Shop';
+    : effectiveShop?.name || 'Selected Shop';
 
   return (
     <div id="admin-dashboard-view" className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto">
@@ -83,11 +99,11 @@ export const AdminDashboard: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            {selectedShopId === 'ALL' 
+            {effectiveShopId === 'ALL'
               ? (platformAdmin
                   ? 'Consolidated company-wide financial performance across all business units'
                   : 'Consolidated financial performance across your managed shops')
-              : `Real-time analytics and financial metrics for ${currentShop?.name || 'selected shop'}`}
+              : `Real-time analytics and financial metrics for ${effectiveShop?.name || 'selected shop'}`}
           </p>
         </div>
 

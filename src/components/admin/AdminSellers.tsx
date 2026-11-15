@@ -130,12 +130,13 @@ const PermissionsSelector: React.FC<{
 // ─────────────────────────────────────────────────────────────
 const SellerActionSheet: React.FC<{
   seller: User;
+  platformAdmin: boolean;
   onClose: () => void;
   onEdit: () => void;
   onPassword: () => void;
   onToggle: () => void;
   onDelete: () => void;
-}> = ({ seller, onClose, onEdit, onPassword, onToggle, onDelete }) => {
+}> = ({ seller, platformAdmin, onClose, onEdit, onPassword, onToggle, onDelete }) => {
   const isActive = seller.status === 'ACTIVE';
 
   // Close on Escape
@@ -200,7 +201,7 @@ const SellerActionSheet: React.FC<{
           <Item
             icon={<Edit className="w-4 h-4 text-slate-400" />}
             label="Edit Seller"
-            hint="Name, shops, permissions, color"
+            hint={platformAdmin ? 'Name, shops, permissions, color' : 'Name, shops, color'}
             onClick={onEdit}
           />
           <Item
@@ -388,7 +389,7 @@ export const AdminSellers: React.FC = () => {
       ? (s.assignedShopIds || []).filter(id => allowedShopIds.includes(id))
       : s.assignedShopIds || [];
     setAssignedShopIds(scopedSelection);
-    setSellerPermissions(s.permissions || {});
+    setSellerPermissions(platformAdmin ? s.permissions || {} : {});
     setFormError('');
     setIsEditModalOpen(true);
   };
@@ -427,7 +428,7 @@ export const AdminSellers: React.FC = () => {
         password,
         color: selectedColor,
         assignedShopIds,
-        permissions: sellerPermissions,
+        ...(platformAdmin ? { permissions: sellerPermissions } : {}),
       },
       currentUser
     );
@@ -451,12 +452,18 @@ export const AdminSellers: React.FC = () => {
         name: name.trim(),
         color: selectedColor,
         assignedShopIds,
-        permissions: sellerPermissions,
+        ...(platformAdmin ? { permissions: sellerPermissions } : {}),
       },
       currentUser
     );
     if (res.success) {
-      addToast({ type: 'success', title: 'Seller Updated', description: `Profile, shop assignments, and permissions for '${name}' updated.` });
+      addToast({
+        type: 'success',
+        title: 'Seller Updated',
+        description: platformAdmin
+          ? `Profile, shop assignments, and permissions for '${name}' updated.`
+          : `Profile and shop assignments for '${name}' updated.`,
+      });
       setIsEditModalOpen(false);
     } else {
       setFormError(res.error || 'Failed to update seller.');
@@ -524,7 +531,9 @@ export const AdminSellers: React.FC = () => {
         <div>
           <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">Seller Account & Shop Assignments</h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Create cashier logins, assign shops, grant granular permissions, override passwords, and manage access.
+            {platformAdmin
+              ? 'Create cashier logins, assign shops, grant granular permissions, override passwords, and manage access.'
+              : 'Create cashier logins for your shop, override passwords, and manage staff access.'}
           </p>
         </div>
         <button
@@ -654,27 +663,29 @@ export const AdminSellers: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Permission badges */}
-                <div className="mb-3">
-                  <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider block mb-1.5 flex items-center gap-1">
-                    <Shield className="w-3 h-3 text-blue-400" />
-                    Granted Permissions:
-                    <span className="text-[10px] text-slate-500 font-mono normal-case">
-                      ({granted.length}/{PERMISSION_DEFS.length})
+                {/* Permission badges — strictly visible to Platform Admin only */}
+                {platformAdmin && (
+                  <div className="mb-3">
+                    <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider block mb-1.5 flex items-center gap-1">
+                      <Shield className="w-3 h-3 text-blue-400" />
+                      Granted Permissions:
+                      <span className="text-[10px] text-slate-500 font-mono normal-case">
+                        ({granted.length}/{PERMISSION_DEFS.length})
+                      </span>
                     </span>
-                  </span>
-                  <div className="flex flex-wrap gap-1">
-                    {granted.length > 0 ? (
-                      granted.map(def => (
-                        <span key={def.key} className={`text-[10px] px-1.5 py-0.5 rounded border ${badgeClassFor(def.color)}`}>
-                          {def.label}
-                        </span>
-                      ))
-                    ) : (
-                      <span className="text-[10px] text-slate-500 italic">No permissions granted</span>
-                    )}
+                    <div className="flex flex-wrap gap-1">
+                      {granted.length > 0 ? (
+                        granted.map(def => (
+                          <span key={def.key} className={`text-[10px] px-1.5 py-0.5 rounded border ${badgeClassFor(def.color)}`}>
+                            {def.label}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-[10px] text-slate-500 italic">No permissions granted</span>
+                      )}
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {/* Meta stats */}
                 <div className="p-3 rounded-xl bg-slate-950 border border-slate-800/80 space-y-1.5 text-xs mb-3.5 sm:mb-4">
@@ -717,6 +728,7 @@ export const AdminSellers: React.FC = () => {
       {actionSheetSeller && (
         <SellerActionSheet
           seller={actionSheetSeller}
+          platformAdmin={platformAdmin}
           onClose={() => setActionSheetSeller(null)}
           onEdit={() => { openEditModal(actionSheetSeller); setActionSheetSeller(null); }}
           onPassword={() => { openPasswordModal(actionSheetSeller); setActionSheetSeller(null); }}
@@ -823,7 +835,9 @@ export const AdminSellers: React.FC = () => {
                 </div>
               </div>
 
-              <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} hidePlatformOnly={!platformAdmin} />
+              {platformAdmin && (
+                <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} />
+              )}
 
               <div>
                 <label className="block text-slate-300 font-medium mb-1.5">Signature Color Theme</label>
@@ -900,7 +914,9 @@ export const AdminSellers: React.FC = () => {
                   )}
               </div>
 
-              <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} hidePlatformOnly={!platformAdmin} />
+              {platformAdmin && (
+                <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} />
+              )}
 
               <div>
                 <label className="block text-slate-300 font-medium mb-1.5">Signature Color Theme</label>

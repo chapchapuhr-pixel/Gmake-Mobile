@@ -82,8 +82,13 @@ export class ReportService {
     }
 
     if (options.shopId && options.shopId !== 'ALL') {
-      filteredSales = filteredSales.filter(s => s.shopId === options.shopId);
-      filteredExpenses = filteredExpenses.filter(e => e.shopId === options.shopId);
+      if (!platformAdmin && shopAdmin && !managedShopIds.includes(options.shopId)) {
+        filteredSales = [];
+        filteredExpenses = [];
+      } else {
+        filteredSales = filteredSales.filter(s => s.shopId === options.shopId);
+        filteredExpenses = filteredExpenses.filter(e => e.shopId === options.shopId);
+      }
     }
 
     if (options.sellerId && options.sellerId !== 'ALL') {

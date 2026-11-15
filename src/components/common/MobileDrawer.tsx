@@ -27,7 +27,9 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { NotificationService } from '../../services/notificationService';
+import { DebtService } from '../../services/debtService';
 import { formatDate } from '../../utils/formatters';
+import { getAdminManagedShops, getEffectiveSellerPermissions, getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
 
 interface MobileDrawerProps {
   isOpen: boolean;
@@ -36,12 +38,14 @@ interface MobileDrawerProps {
 
 interface NavItem {
   id: string;
-  label: string;
-  subtitle?: string;
+  swahiliLabel: string;
+  englishLabel: string;
   icon: React.ElementType;
   badge?: number | string;
   badgeColor?: 'red' | 'amber' | 'blue';
   category: 'core' | 'operations' | 'management' | 'system';
+  requiresPermission?: keyof import('../../types').SellerPermissions;
+  requiresAnyPermission?: (keyof import('../../types').SellerPermissions)[];
 }
 
 export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) => {
@@ -62,52 +66,140 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
 
   if (!isOpen || !currentUser) return null;
 
+  const isPlatformAdm = isPlatformAdmin(currentUser);
+  const isShopAdm = isShopAdmin(currentUser);
+  const showAdminMenu = isPlatformAdm || isShopAdm;
   const isSeller = currentUser.role === 'SELLER';
-  const isAdmin = currentUser.role === 'ADMIN';
+  const managedShopIds = getShopAdminShopIds(currentUser);
+  const assignedShopIds = currentUser.assignedShopIds || [];
+  const scopedShopIds = isPlatformAdm
+    ? null
+    : isShopAdm
+    ? managedShopIds
+    : assignedShopIds;
+  const managedShops = getAdminManagedShops(currentUser, dbState.shops || []);
   const settings = dbState.settings;
 
-  // Count low-stock items
+  // Count low-stock items within accessible shop scope
   const lowStockCount = (dbState.products || []).filter(
-    p => p.status === 'ACTIVE' && p.currentStock <= p.minStock
+    p =>
+      p.status === 'ACTIVE' &&
+      p.currentStock <= p.minStock &&
+      (!scopedShopIds || scopedShopIds.length === 0 || scopedShopIds.includes(p.shopId))
   ).length;
 
   // Count unread notifications
   const unreadNotifsCount = NotificationService.getUnreadCount(currentUser);
 
-  // Count pending/overdue debts
-  const debts = dbState.debts || [];
+  // Count pending/overdue debts within user scope
+  const debts = DebtService.getAllDebts(currentUser);
   const overdueDebtsCount = debts.filter(d => d.status === 'OVERDUE').length;
 
+  const sellerPermissions = getEffectiveSellerPermissions(currentUser);
+
+  const hasPermission = (perm: keyof import('../../types').SellerPermissions): boolean => {
+    if (showAdminMenu) return true;
+    return !!sellerPermissions[perm];
+  };
+
+  const hasAnyPermission = (
+    perms: (keyof import('../../types').SellerPermissions)[]
+  ): boolean => {
+    if (showAdminMenu) return true;
+    return perms.some(perm => !!sellerPermissions[perm]);
+  };
+
   const sellerNav: NavItem[] = [
-    { id: 'dashboard', label: 'Dashboard', subtitle: 'Muhtasari wa mauzo na takwimu', icon: LayoutDashboard, category: 'core' },
-    { id: 'new_sale', label: 'New Sale (POS)', subtitle: 'Kuuza bidhaa na risiti', icon: ShoppingCart, category: 'core' },
-    { id: 'products', label: 'Product Catalog', subtitle: 'Orodha ya bidhaa na bei', icon: Package, badge: lowStockCount > 0 ? lowStockCount : undefined, category: 'operations' },
-    { id: 'purchases', label: 'Purchases (Manunuzi)', subtitle: 'Kuingiza mzigo dukani', icon: Truck, category: 'operations' },
-    { id: 'my_sales', label: 'My Sales History', subtitle: 'Historia ya mauzo yangu', icon: History, category: 'operations' },
-    { id: 'debts', label: 'Debt Management (Madeni)', subtitle: 'Wanaotudai & tunaowadai', icon: FileText, badge: overdueDebtsCount > 0 ? `${overdueDebtsCount} Overdue` : debts.filter(d => d.status !== 'PAID').length || undefined, badgeColor: overdueDebtsCount > 0 ? 'red' : 'amber', category: 'management' },
-    { id: 'notifications', label: 'Taarifa & Vikumbusho', subtitle: 'Stock, madeni na bei', icon: Bell, badge: unreadNotifsCount > 0 ? unreadNotifsCount : undefined, badgeColor: 'red', category: 'management' },
-    { id: 'receipts', label: 'Receipts (Risiti)', subtitle: 'Kutazama na kuchapisha risiti', icon: Receipt, category: 'management' },
-    { id: 'settings', label: 'Seller Settings', subtitle: 'Mpangilio wa akaunti', icon: Settings, category: 'system' },
+    { id: 'dashboard', swahiliLabel: 'Muhtasari wa Mauzo', englishLabel: 'Dashboard', icon: LayoutDashboard, category: 'core' },
+    { id: 'new_sale', swahiliLabel: 'Mauzo Mapya (POS)', englishLabel: 'New Sale (POS)', icon: ShoppingCart, category: 'core' },
+    { id: 'products', swahiliLabel: 'Orodha ya Bidhaa', englishLabel: 'Product Catalog', icon: Package, badge: lowStockCount > 0 ? lowStockCount : undefined, category: 'operations' },
+    { id: 'purchases', swahiliLabel: 'Manunuzi ya Mzigo', englishLabel: 'Purchases & Stock In', icon: Truck, category: 'operations' },
+    { id: 'my_sales', swahiliLabel: 'Historia ya Mauzo Yangu', englishLabel: 'My Sales History', icon: History, category: 'operations' },
+    { id: 'debts', swahiliLabel: 'Daftari la Madeni', englishLabel: 'Debt Management', icon: FileText, badge: overdueDebtsCount > 0 ? `${overdueDebtsCount} Overdue` : debts.filter(d => d.status !== 'PAID').length || undefined, badgeColor: overdueDebtsCount > 0 ? 'red' : 'amber', category: 'management' },
+    { id: 'notifications', swahiliLabel: 'Taarifa na Vikumbusho', englishLabel: 'Notifications & Alerts', icon: Bell, badge: unreadNotifsCount > 0 ? unreadNotifsCount : undefined, badgeColor: 'red', category: 'management' },
+    { id: 'receipts', swahiliLabel: 'Risiti za Mauzo', englishLabel: 'Receipts', icon: Receipt, category: 'management' },
+
+    // Permission-gated admin modules granted to seller
+    {
+      id: 'sales',
+      swahiliLabel: 'Mauzo Yote (Hariri)',
+      englishLabel: 'All Sales History',
+      icon: History,
+      category: 'management',
+      requiresAnyPermission: ['canEditSales', 'canDeleteSales'],
+    },
+    {
+      id: 'inventory',
+      swahiliLabel: 'Usimamizi wa Stoo',
+      englishLabel: 'Inventory Management',
+      icon: Boxes,
+      badge: lowStockCount > 0 ? `${lowStockCount} Low` : undefined,
+      category: 'management',
+      requiresPermission: 'canManageInventory',
+    },
+    {
+      id: 'expenses',
+      swahiliLabel: 'Matumizi ya Duka',
+      englishLabel: 'Expenses',
+      icon: TrendingDown,
+      category: 'management',
+      requiresAnyPermission: ['canViewExpenses', 'canRecordExpenses'],
+    },
+    {
+      id: 'reports',
+      swahiliLabel: 'Ripoti za Kifedha',
+      englishLabel: 'Reports & Analytics',
+      icon: BarChart3,
+      category: 'management',
+      requiresPermission: 'canViewReports',
+    },
+    {
+      id: 'shops',
+      swahiliLabel: 'Maduka na Vitengo',
+      englishLabel: 'Shops & Business Units',
+      icon: Store,
+      badge: (dbState.shops || []).length,
+      category: 'management',
+      requiresPermission: 'canManageShops',
+    },
+    {
+      id: 'sellers',
+      swahiliLabel: 'Wauzaji na Ruhusa',
+      englishLabel: 'Sellers & Staff Accounts',
+      icon: Users,
+      category: 'management',
+      requiresPermission: 'canManageSellers',
+    },
+
+    { id: 'settings', swahiliLabel: 'Mipangilio ya Akaunti', englishLabel: 'Seller Settings', icon: Settings, category: 'system' },
   ];
 
   const adminNav: NavItem[] = [
-    { id: 'dashboard', label: 'Executive Dashboard', subtitle: 'Uchambuzi wa kampuni yote', icon: LayoutDashboard, category: 'core' },
-    { id: 'new_sale', label: 'New Sale (POS Terminal)', subtitle: 'Kuuza na kutoa risiti', icon: ShoppingCart, category: 'core' },
-    { id: 'shops', label: 'Shops & Business Units', subtitle: 'Maduka na vitengo vyote', icon: Store, badge: (dbState.shops || []).length, category: 'core' },
-    { id: 'sales', label: 'Sales Transactions', subtitle: 'Historia na faida ya mauzo', icon: History, category: 'operations' },
-    { id: 'products', label: 'Products & Categories', subtitle: 'Bidhaa, picha na makundi', icon: Package, category: 'operations' },
-    { id: 'inventory', label: 'Stock & Inventory', subtitle: 'Kudhibiti na marekebisho ya stoo', icon: Boxes, badge: lowStockCount > 0 ? `${lowStockCount} Low` : undefined, category: 'operations' },
-    { id: 'purchases', label: 'Purchases & Stock-In', subtitle: 'Manunuzi na gharama za mzigo', icon: Truck, category: 'operations' },
-    { id: 'expenses', label: 'Operational Expenses', subtitle: 'Matumizi ya duka na kampuni', icon: TrendingDown, category: 'operations' },
-    { id: 'debts', label: 'Debt Management (Madeni)', subtitle: 'Daftari la madeni na vikumbusho', icon: FileText, badge: overdueDebtsCount > 0 ? `${overdueDebtsCount} Overdue` : undefined, badgeColor: 'red', category: 'management' },
-    { id: 'reports', label: 'Reports & Analytics', subtitle: 'Ripoti za kifedha na faida', icon: BarChart3, category: 'management' },
-    { id: 'sellers', label: 'Sellers & Staff Accounts', subtitle: 'Wauzaji, maduka na password', icon: Users, category: 'management' },
-    { id: 'notifications', label: 'Notification Center', subtitle: 'Tahadhari na taarifa za mfumo', icon: Bell, badge: unreadNotifsCount > 0 ? unreadNotifsCount : undefined, badgeColor: 'red', category: 'management' },
-    { id: 'data_management', label: 'Data & CSV Backup', subtitle: 'Kuhifadhi, import na export', icon: Database, category: 'system' },
-    { id: 'settings', label: 'System Settings', subtitle: 'Identity, theme, na kodi', icon: Settings, category: 'system' },
+    { id: 'dashboard', swahiliLabel: isPlatformAdm ? 'Uchambuzi wa Kampuni' : 'Uchambuzi wa Duka', englishLabel: isPlatformAdm ? 'Executive Dashboard' : 'Shop Dashboard', icon: LayoutDashboard, category: 'core' },
+    { id: 'new_sale', swahiliLabel: 'Mauzo Mapya (POS)', englishLabel: 'New Sale (POS Terminal)', icon: ShoppingCart, category: 'core' },
+    { id: 'shops', swahiliLabel: 'Maduka na Vitengo', englishLabel: 'Shops & Business Units', icon: Store, badge: managedShops.length, category: 'core' },
+    { id: 'sales', swahiliLabel: 'Mauzo', englishLabel: 'Sales Transactions', icon: History, category: 'operations' },
+    { id: 'products', swahiliLabel: 'Bidhaa na Makundi', englishLabel: 'Products & Categories', icon: Package, category: 'operations' },
+    { id: 'inventory', swahiliLabel: 'Stoo na Hesabu', englishLabel: 'Stock & Inventory', icon: Boxes, badge: lowStockCount > 0 ? `${lowStockCount} Low` : undefined, category: 'operations' },
+    { id: 'purchases', swahiliLabel: 'Manunuzi ya Mzigo', englishLabel: 'Purchases & Stock-In', icon: Truck, category: 'operations' },
+    { id: 'expenses', swahiliLabel: 'Matumizi ya Uendeshaji', englishLabel: 'Operational Expenses', icon: TrendingDown, category: 'operations' },
+    { id: 'debts', swahiliLabel: 'Daftari la Madeni', englishLabel: 'Debt Management', icon: FileText, badge: overdueDebtsCount > 0 ? `${overdueDebtsCount} Overdue` : undefined, badgeColor: 'red', category: 'management' },
+    { id: 'reports', swahiliLabel: 'Ripoti na Uchambuzi', englishLabel: 'Reports & Analytics', icon: BarChart3, category: 'management' },
+    { id: 'sellers', swahiliLabel: 'Wauzaji na Wafanyakazi', englishLabel: 'Sellers & Staff Accounts', icon: Users, category: 'management' },
+    { id: 'notifications', swahiliLabel: 'Kituo cha Taarifa', englishLabel: 'Notification Center', icon: Bell, badge: unreadNotifsCount > 0 ? unreadNotifsCount : undefined, badgeColor: 'red', category: 'management' },
+    ...(isPlatformAdm ? [{ id: 'data_management', swahiliLabel: 'Hifadhi ya Data (CSV)', englishLabel: 'Data & CSV Backup', icon: Database, category: 'system' as const }] : []),
+    { id: 'settings', swahiliLabel: isPlatformAdm ? 'Mipangilio ya Mfumo' : 'Mipangilio ya Akaunti', englishLabel: isPlatformAdm ? 'System Settings' : 'Account Settings', icon: Settings, category: 'system' },
   ];
 
-  const items = isSeller ? sellerNav : adminNav;
+  const items = (showAdminMenu ? adminNav : sellerNav).filter(item => {
+    if (item.requiresPermission) {
+      return hasPermission(item.requiresPermission);
+    }
+    if (item.requiresAnyPermission) {
+      return hasAnyPermission(item.requiresAnyPermission);
+    }
+    return true;
+  });
 
   const handleNavClick = (tabId: string) => {
     setActiveTab(tabId);
@@ -123,7 +215,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       />
 
       {/* Drawer Panel */}
-      <div className="relative w-[85vw] max-w-[340px] bg-slate-900 border-r border-slate-800 h-full flex flex-col justify-between shadow-2xl z-10 overflow-hidden">
+      <div className="relative w-[88vw] max-w-[360px] bg-slate-900 border-r border-slate-800 h-full flex flex-col justify-between shadow-2xl z-10 overflow-hidden">
         {/* Drawer Header */}
         <div className="p-4 border-b border-slate-800 bg-slate-950/80 safe-top">
           <div className="flex items-center justify-between mb-3">
@@ -132,18 +224,20 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                 className="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-white shadow-md"
                 style={{ backgroundColor: isSeller ? sellerColor.primary : '#2563eb' }}
               >
-                {isAdmin ? <Shield className="w-5 h-5" /> : currentUser.name.charAt(0).toUpperCase()}
+                {showAdminMenu ? <Shield className="w-5 h-5" /> : currentUser.name.charAt(0).toUpperCase()}
               </div>
               <div className="min-w-0">
                 <h3 className="text-sm font-bold text-white truncate">{currentUser.name}</h3>
                 <span
                   className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider ${
-                    isAdmin
+                    isPlatformAdm
                       ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                      : isShopAdm
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                       : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
                   }`}
                 >
-                  {isAdmin ? 'Administrator' : 'Seller'}
+                  {isPlatformAdm ? 'Administrator' : isShopAdm ? 'Shop Admin' : 'Seller'}
                 </span>
               </div>
             </div>
@@ -168,7 +262,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
               )}
             </div>
 
-            {isAdmin ? (
+            {isPlatformAdm || (isShopAdm && managedShops.length > 1) ? (
               <select
                 id="drawer-admin-shop-select"
                 value={selectedShopId}
@@ -177,8 +271,10 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                 }}
                 className="w-full bg-slate-950 text-xs text-white font-medium py-2 px-2.5 rounded-lg border border-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
               >
-                <option value="ALL">🏢 All Shops (Overview)</option>
-                {availableShops.map(sh => (
+                <option value="ALL">
+                  {isPlatformAdm ? '🏢 All Shops (Overview)' : '🏢 All Managed Shops'}
+                </option>
+                {(isPlatformAdm ? availableShops : managedShops).map(sh => (
                   <option key={sh.id} value={sh.id}>
                     {sh.status === 'INACTIVE' ? `🚫 ${sh.name} (Inactive)` : `🏪 ${sh.name}`}
                   </option>
@@ -212,7 +308,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
         </div>
 
         {/* Navigation Items List */}
-        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1">
+        <nav className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5">
           {items.map(item => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
@@ -222,10 +318,10 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                 key={item.id}
                 id={`drawer-nav-${item.id}`}
                 onClick={() => handleNavClick(item.id)}
-                className={`w-full flex items-center justify-between p-2.5 rounded-xl text-left transition-all ${
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left font-medium transition-all ${
                   isActive
-                    ? 'text-white shadow-md font-semibold'
-                    : 'text-slate-300 hover:text-white hover:bg-slate-800/70'
+                    ? 'text-white shadow-md'
+                    : 'text-slate-200 hover:text-white hover:bg-slate-800/70'
                 }`}
                 style={{
                   backgroundColor: isActive
@@ -235,21 +331,25 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                     : undefined,
                 }}
               >
-                <div className="flex items-center gap-3 min-w-0">
+                <div className="flex items-center gap-3 min-w-0 flex-1 pr-2">
                   <div
-                    className={`p-2 rounded-lg ${
+                    className={`p-2 rounded-lg shrink-0 ${
                       isActive ? 'bg-white/20 text-white' : 'bg-slate-800 text-slate-400'
                     }`}
                   >
                     <Icon className="w-4 h-4 shrink-0" />
                   </div>
-                  <div className="min-w-0">
-                    <div className="text-xs font-semibold truncate">{item.label}</div>
-                    {item.subtitle && (
-                      <div className={`text-[10px] truncate ${isActive ? 'text-white/80' : 'text-slate-500'}`}>
-                        {item.subtitle}
-                      </div>
-                    )}
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[19px] leading-snug font-medium truncate">
+                      {item.swahiliLabel}
+                    </div>
+                    <div
+                      className={`text-[14px] leading-snug font-normal truncate ${
+                        isActive ? 'text-white/85' : 'text-slate-400'
+                      }`}
+                    >
+                      {item.englishLabel}
+                    </div>
                   </div>
                 </div>
 
@@ -274,7 +374,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
               </button>
             );
           })}
-        </div>
+        </nav>
 
         {/* Drawer Footer with Sync, Offline & Logout */}
         <div className="p-3 border-t border-slate-800 bg-slate-950/90 safe-bottom space-y-2">

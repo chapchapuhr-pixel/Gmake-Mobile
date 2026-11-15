@@ -17,6 +17,12 @@ import {
 import { useApp } from '../../context/AppContext';
 import { ReportService } from '../../services/reportService';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
+import {
+  getAdminManagedShops,
+  hasAdminAccess,
+  isPlatformAdmin,
+  isShopAdmin,
+} from '../../utils/permissions';
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -209,11 +215,21 @@ export const AdminReports: React.FC = () => {
   const [deviationDirection, setDeviationDirection] = useState<DeviationDirection>('ALL');
 
   if (!currentUser) return null;
-  if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canViewReports) return null;
+  if (!hasAdminAccess(currentUser) && !currentUser.permissions?.canViewReports) return null;
 
+  const platformAdmin = isPlatformAdmin(currentUser);
+  const shopAdmin = isShopAdmin(currentUser);
   const settings = dbState.settings;
-  const shops = dbState.shops || [];
-  const products = dbState.products || [];
+  const allShops = dbState.shops || [];
+  const shops = platformAdmin
+    ? allShops
+    : shopAdmin
+      ? getAdminManagedShops(currentUser, allShops)
+      : allShops.filter((s: any) => (currentUser.assignedShopIds || []).includes(s.id));
+  const visibleShopIdSet = new Set(shops.map((s: any) => s.id));
+  const products = (dbState.products || []).filter(
+    (p: any) => platformAdmin || (!!p.shopId && visibleShopIdSet.has(p.shopId))
+  );
 
   const incomeRange = useMemo(() => computeRange(incomePeriod, incomeStart, incomeEnd), [incomePeriod, incomeStart, incomeEnd]);
   const deviationRange = useMemo(() => computeRange(deviationPeriod, deviationStart, deviationEnd), [deviationPeriod, deviationStart, deviationEnd]);
@@ -242,7 +258,13 @@ export const AdminReports: React.FC = () => {
   }, [sellerSummary, sellerSearch]);
 
   const selectedShopName =
-    shopFilter === 'ALL' ? 'All Shops' : shops.find((s: any) => s.id === shopFilter)?.name || 'Unknown';
+    shopFilter === 'ALL'
+      ? shopAdmin && !platformAdmin
+        ? shops.length === 1
+          ? shops[0].name
+          : 'All Managed Shops'
+        : 'All Shops'
+      : shops.find((s: any) => s.id === shopFilter)?.name || 'Unknown';
 
   // ─────────────────────────────────────────────────────────────
   // Deviations — snapshot-first, below-cost detection, no silent skips
@@ -662,10 +684,13 @@ export const AdminReports: React.FC = () => {
           onChange={e => setShopFilter(e.target.value)}
           className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
         >
-          <option value="ALL">🏪 All Shops</option>
-          {shops.map((s: any) => (
-            <option key={s.id} value={s.id}>🏪 {s.name}</option>
-          ))}
+          <option value="ALL">
+            🏪 {shopAdmin && !platformAdmin ? (shops.length === 1 ? shops[0].name : 'All Managed Shops') : 'All Shops'}
+          </option>
+          {(platformAdmin || shops.length > 1) &&
+            shops.map((s: any) => (
+              <option key={s.id} value={s.id}>🏪 {s.name}</option>
+            ))}
         </select>
 
         <div className="flex items-center gap-2">

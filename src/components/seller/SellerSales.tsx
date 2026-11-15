@@ -94,6 +94,7 @@ export const SellerSales: React.FC = () => {
   // Query sales — uses the computed start/end
   const sales = SalesService.getSales(
     {
+      personalOnly: true,
       search: searchQuery,
       startDate: startDate || undefined,
       endDate: endDate || undefined,

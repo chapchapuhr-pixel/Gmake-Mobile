@@ -63,6 +63,7 @@ export const SellerReceipts: React.FC = () => {
   // Recent sales scoped by period
   const recentSales = SalesService.getSales(
     {
+      personalOnly: true,
       startDate: startDate || undefined,
       endDate: endDate || undefined,
     },

@@ -2,6 +2,7 @@ import { db } from '../db/storage';
 import { Purchase, PurchaseItem, PaymentStatus, User } from '../types';
 import { generateUUID } from '../utils/crypto';
 import { generatePurchaseNumber } from '../utils/formatters';
+import { canAccessShopAsAdmin, getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export interface PurchaseItemInput {
   productId: string;
@@ -26,16 +27,33 @@ export class PurchaseService {
     },
     currentUser: User
   ): { success: boolean; purchase?: Purchase; error?: string } {
-    const targetShopId = params.shopId || db.getShops()[0]?.id || 'shop-1';
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    const managedShopIds = getShopAdminShopIds(currentUser);
+
+    const targetShopId =
+      params.shopId ||
+      (!platformAdmin && shopAdmin ? managedShopIds[0] : undefined) ||
+      db.getShops()[0]?.id ||
+      'shop-1';
 
     // Check role and shop assignment permissions
-    if (currentUser.role === 'SELLER') {
-      const assigned = currentUser.assignedShopIds || [];
-      if (assigned.length > 0 && !assigned.includes(targetShopId)) {
-        return {
-          success: false,
-          error: 'Permission Denied: You are not assigned to record purchases for this shop.',
-        };
+    if (!platformAdmin) {
+      if (shopAdmin) {
+        if (!managedShopIds.includes(targetShopId)) {
+          return {
+            success: false,
+            error: 'Permission Denied: You can only record purchases for your managed shop.',
+          };
+        }
+      } else {
+        const assigned = currentUser.assignedShopIds || [];
+        if (assigned.length > 0 && !assigned.includes(targetShopId)) {
+          return {
+            success: false,
+            error: 'Permission Denied: You are not assigned to record purchases for this shop.',
+          };
+        }
       }
     }
     const shop = db.getShops().find(s => s.id === targetShopId);
@@ -212,10 +230,15 @@ export class PurchaseService {
     const current = purchases[index];
 
     // Check permissions
-    if (currentUser.role !== 'ADMIN' && current.createdByUserId !== currentUser.id) {
+    const canEdit =
+      isPlatformAdmin(currentUser) ||
+      canAccessShopAsAdmin(currentUser, current.shopId) ||
+      current.createdByUserId === currentUser.id;
+
+    if (!canEdit) {
       return {
         success: false,
-        error: 'Permission Denied: You can only update purchases you created.',
+        error: 'Permission Denied: You can only update purchases from your managed shop.',
       };
     }
 
@@ -393,9 +416,14 @@ export class PurchaseService {
       startDate?: string;
       endDate?: string;
     },
-    _currentUser?: User
+    currentUser?: User
   ): Purchase[] {
     let purchases = db.getPurchases();
+
+    if (currentUser && !isPlatformAdmin(currentUser) && isShopAdmin(currentUser)) {
+      const managedIds = getShopAdminShopIds(currentUser);
+      purchases = purchases.filter(p => managedIds.includes(p.shopId));
+    }
 
     if (options?.shopId && options.shopId !== 'ALL') {
       purchases = purchases.filter(p => p.shopId === options.shopId);

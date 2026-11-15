@@ -1,6 +1,7 @@
 import { db } from '../db/storage';
 import { AppNotification, NotificationType, NotificationCategory, User, Product } from '../types';
 import { DebtService } from './debtService';
+import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export class NotificationService {
   private static getTodayStr(): string {
@@ -289,17 +290,25 @@ export class NotificationService {
   }
 
   /**
-   * FIX: Notify admins when a seller requests a sale edit
+   * Notify platform admins and designated shop admins when a seller requests a sale edit
    */
-  public static notifySaleEditRequested(request: any, adminUserId: string): void {
+  public static notifySaleEditRequested(
+    request: any,
+    adminUserIds: string | string[],
+    shopId?: string,
+    shopName?: string
+  ): void {
+    const recipientIds = Array.isArray(adminUserIds) ? adminUserIds : [adminUserIds];
     const notification: AppNotification = {
       id: `notif-sale-edit-req-${request.id}`,
       type: 'SALE_EDIT_REQUESTED',
       category: 'WARNING',
-      title: 'Ombi la Marekebisho ya Mauzo',
+      title: shopName ? `Ombi la Marekebisho ya Mauzo (${shopName})` : 'Ombi la Marekebisho ya Mauzo',
       message: `${request.requestedByName} ameomba kuhariri mauzo. Sababu: ${request.reason}`,
       isGlobal: false,
-      targetUserIds: [adminUserId],
+      targetShopId: shopId,
+      targetShopName: shopName,
+      targetUserIds: recipientIds,
       targetRole: 'ADMIN',
       relatedEntityId: request.id,
       relatedEntityType: 'SALE_EDIT_REQUEST',
@@ -350,12 +359,49 @@ export class NotificationService {
     if (!user) return [];
 
     const all = db.getNotifications();
+    const platformAdmin = isPlatformAdmin(user);
+    const shopAdmin = isShopAdmin(user);
+    const managedShopIds = getShopAdminShopIds(user);
+    const assignedShopIds = user.assignedShopIds || [];
+    const allowedShopIds = Array.from(new Set([...managedShopIds, ...assignedShopIds]));
 
     return all.filter(n => {
-      if (n.isGlobal) return true;
-
-      if (user.role === 'ADMIN') {
+      if (platformAdmin) {
         if (n.targetRole === 'SELLER') return false;
+        return true;
+      }
+
+      if (n.isGlobal) {
+        if (n.targetShopId) {
+          return allowedShopIds.includes(n.targetShopId);
+        }
+        return true;
+      }
+
+      if (shopAdmin) {
+        if (n.targetUserIds && n.targetUserIds.length > 0) {
+          if (n.targetUserIds.includes(user.id)) return true;
+          if (n.relatedEntityType === 'DEBT') {
+            return !!n.targetShopId && allowedShopIds.includes(n.targetShopId);
+          }
+          if (n.targetRole === 'ADMIN') {
+            return !!n.targetShopId && managedShopIds.includes(n.targetShopId);
+          }
+          return false;
+        }
+
+        if (n.targetRole === 'ADMIN') {
+          return !!n.targetShopId && managedShopIds.includes(n.targetShopId);
+        }
+
+        if (n.targetShopId) {
+          return allowedShopIds.includes(n.targetShopId);
+        }
+
+        if (n.relatedEntityType === 'DEBT') {
+          return false;
+        }
+
         return true;
       }
 
@@ -364,7 +410,7 @@ export class NotificationService {
       if (n.targetUserIds && n.targetUserIds.length > 0) {
         if (n.targetUserIds.includes(user.id)) return true;
         if (n.relatedEntityType === 'DEBT') {
-          if (n.targetShopId && user.assignedShopIds?.includes(n.targetShopId)) {
+          if (n.targetShopId && assignedShopIds.includes(n.targetShopId)) {
             return true;
           }
           return false;
@@ -372,8 +418,7 @@ export class NotificationService {
       }
 
       if (n.targetShopId) {
-        const assigned = user.assignedShopIds || [];
-        return assigned.includes(n.targetShopId);
+        return assignedShopIds.includes(n.targetShopId);
       }
 
       if (n.relatedEntityType === 'DEBT') {

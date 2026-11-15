@@ -15,6 +15,12 @@ import { useApp } from '../../context/AppContext';
 import { PurchaseService } from '../../services/purchaseService';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import type { Purchase } from '../../types';
+import {
+  getAdminManagedShops,
+  hasAdminAccess,
+  isPlatformAdmin,
+  isShopAdmin,
+} from '../../utils/permissions';
 
 const PAGE_SIZE = 15;
 
@@ -269,15 +275,24 @@ export const AdminPurchases: React.FC = () => {
 
   const canRecordPurchase = true;
   const settings = dbState.settings;
-  const isSeller = currentUser.role === 'SELLER';
+  const platformAdmin = isPlatformAdmin(currentUser);
+  const shopAdmin = isShopAdmin(currentUser);
+  const isSeller = !hasAdminAccess(currentUser);
 
-  const availableShops = dbState.shops.filter(s => {
-    if (currentUser.role === 'ADMIN') return true;
-    const assigned = currentUser.assignedShopIds || [];
-    return assigned.length === 0 || assigned.includes(s.id);
-  });
+  const availableShops = platformAdmin
+    ? dbState.shops || []
+    : shopAdmin
+      ? getAdminManagedShops(currentUser, dbState.shops || [])
+      : (dbState.shops || []).filter(s => {
+          const assigned = currentUser.assignedShopIds || [];
+          return assigned.length === 0 || assigned.includes(s.id);
+        });
+  const visibleShopIdSet = new Set(availableShops.map(s => s.id));
+  const visibleProducts = (dbState.products || []).filter(
+    p => platformAdmin || (!!p.shopId && visibleShopIdSet.has(p.shopId))
+  );
 
-  const shopProducts = dbState.products.filter(
+  const shopProducts = visibleProducts.filter(
     p => !purchaseShopId || purchaseShopId === 'ALL' || p.shopId === purchaseShopId
   );
 
@@ -345,8 +360,10 @@ export const AdminPurchases: React.FC = () => {
 
   const openNewPurchaseModal = () => {
     const targetShop =
-      currentShop?.id ||
-      (selectedShopId !== 'ALL' ? selectedShopId : availableShops[0]?.id) ||
+      (currentShop?.id && visibleShopIdSet.has(currentShop.id) ? currentShop.id : undefined) ||
+      (selectedShopId !== 'ALL' && visibleShopIdSet.has(selectedShopId)
+        ? selectedShopId
+        : availableShops[0]?.id) ||
       '';
     setPurchaseShopId(targetShop);
     setSupplierName('');
@@ -356,8 +373,8 @@ export const AdminPurchases: React.FC = () => {
     setIsEditMode(false);
     setEditingPurchase(null);
 
-    const prodList = dbState.products.filter(p => p.shopId === targetShop);
-    const initialProd = prodList[0] || dbState.products[0];
+    const prodList = visibleProducts.filter(p => p.shopId === targetShop);
+    const initialProd = prodList[0] || visibleProducts[0];
 
     setItems([
       {
@@ -392,8 +409,8 @@ export const AdminPurchases: React.FC = () => {
   };
 
   const addItemRow = () => {
-    const prodList = dbState.products.filter(p => !purchaseShopId || p.shopId === purchaseShopId);
-    const prod = prodList[0] || dbState.products[0];
+    const prodList = visibleProducts.filter(p => !purchaseShopId || p.shopId === purchaseShopId);
+    const prod = prodList[0] || visibleProducts[0];
     setItems(prev => [
       ...prev,
       {
@@ -413,7 +430,7 @@ export const AdminPurchases: React.FC = () => {
       prev.map((item, i) => {
         if (i !== idx) return item;
         if (field === 'productId') {
-          const matched = dbState.products.find(p => p.id === value);
+          const matched = visibleProducts.find(p => p.id === value);
           return {
             ...item,
             productId: value,
@@ -862,7 +879,7 @@ export const AdminPurchases: React.FC = () => {
                       className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 space-y-2"
                     >
                       <ProductSearchSelect
-                        products={shopProducts.length > 0 ? shopProducts : dbState.products}
+                        products={shopProducts.length > 0 ? shopProducts : visibleProducts}
                         value={item.productId}
                         onChange={productId => updateItemRow(idx, 'productId', productId)}
                         currencySymbol={settings.currencySymbol}

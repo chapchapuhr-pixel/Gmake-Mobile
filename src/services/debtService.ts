@@ -1,8 +1,30 @@
 import { db } from '../db/storage';
 import { DebtRecord, DebtSummary, DebtType, DebtStatus, DebtPayment, User } from '../types';
 import { generateUUID } from '../utils/crypto';
+import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export class DebtService {
+  /**
+   * Determine if a user can access/manage a given debt record.
+   * Platform Admin sees all; Shop Admin sees debts belonging to their managed shop(s);
+   * Regular Seller sees only debts they created.
+   */
+  public static canUserAccessDebt(debt: DebtRecord, user?: User): boolean {
+    if (!user) return true;
+    if (isPlatformAdmin(user)) return true;
+
+    if (isShopAdmin(user)) {
+      const managedIds = getShopAdminShopIds(user);
+      if (debt.shopId) {
+        return managedIds.includes(debt.shopId);
+      }
+      if (debt.createdByUserId === user.id) return true;
+      const creator = db.getUsers().find(u => u.id === debt.createdByUserId);
+      return !!(creator && (creator.assignedShopIds || []).some(id => managedIds.includes(id)));
+    }
+
+    return debt.createdByUserId === user.id;
+  }
   /**
    * Helper to normalize a date string (YYYY-MM-DD) to compare with today
    */
@@ -68,9 +90,8 @@ export class DebtService {
   public static getAllDebts(currentUser?: User): DebtRecord[] {
     let rawDebts = db.getDebts();
 
-    // Filter: Admin sees all, Sellers see only their own
-    if (currentUser && currentUser.role === 'SELLER') {
-      rawDebts = rawDebts.filter(d => d.createdByUserId === currentUser.id);
+    if (currentUser && !isPlatformAdmin(currentUser)) {
+      rawDebts = rawDebts.filter(d => this.canUserAccessDebt(d, currentUser));
     }
 
     const todayStr = this.getTodayStr();
@@ -239,11 +260,13 @@ export class DebtService {
       return { success: false, error: 'Rekodi ya deni haijapatikana / Debt not found' };
     }
 
-    // Ownership check: Seller can only pay their own debts
-    if (user.role === 'SELLER' && existing.createdByUserId !== user.id) {
+    // Ownership / Shop Admin scope check
+    if (!this.canUserAccessDebt(existing, user)) {
       return {
         success: false,
-        error: 'Unaweza kusimamia madeni yako tu / You can only manage your own debts.',
+        error: isShopAdmin(user)
+          ? 'Unaweza kusimamia madeni ya duka unalosimamia tu / You can only manage debts for your shop.'
+          : 'Unaweza kusimamia madeni yako tu / You can only manage your own debts.',
       };
     }
 
@@ -337,8 +360,8 @@ export class DebtService {
     const existing = rawDebts.find(d => d.id === debtId);
     if (!existing) return false;
 
-    // Ownership check
-    if (user.role === 'SELLER' && existing.createdByUserId !== user.id) {
+    // Ownership / Shop Admin scope check
+    if (!this.canUserAccessDebt(existing, user)) {
       return false;
     }
 
@@ -370,8 +393,8 @@ export class DebtService {
     const existing = rawDebts.find(d => d.id === debtId);
     if (!existing) return false;
 
-    // Ownership check
-    if (currentUser && currentUser.role === 'SELLER' && existing.createdByUserId !== currentUser.id) {
+    // Ownership / Shop Admin scope check
+    if (currentUser && !this.canUserAccessDebt(existing, currentUser)) {
       return false;
     }
 
@@ -409,8 +432,8 @@ export class DebtService {
     const existing = rawDebts.find(d => d.id === debtId);
     if (!existing) return false;
 
-    // Ownership check
-    if (currentUser && currentUser.role === 'SELLER' && existing.createdByUserId !== currentUser.id) {
+    // Ownership / Shop Admin scope check
+    if (currentUser && !this.canUserAccessDebt(existing, currentUser)) {
       return false;
     }
 

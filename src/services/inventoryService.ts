@@ -1,6 +1,7 @@
 import { db } from '../db/storage';
 import { InventoryMovement, MovementType, User } from '../types';
 import { generateUUID } from '../utils/crypto';
+import { canAccessShopAsAdmin, getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export class InventoryService {
   /**
@@ -14,8 +15,10 @@ export class InventoryService {
     currentUser: User,
     movementType: MovementType = 'ADJUSTMENT'
   ): { success: boolean; error?: string; lossValue?: number } {
-    // FIX: Allow Admin OR Seller with canManageInventory permission
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canManageInventory) {
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+
+    if (!platformAdmin && !shopAdmin && !currentUser.permissions?.canManageInventory) {
       return {
         success: false,
         error: 'Permission Denied: You do not have permission to adjust stock levels.',
@@ -33,6 +36,12 @@ export class InventoryService {
     }
 
     const prod = products[prodIndex];
+    if (!platformAdmin && shopAdmin && !canAccessShopAsAdmin(currentUser, prod.shopId)) {
+      return {
+        success: false,
+        error: 'Permission Denied: You can only adjust stock for products in your managed shop.',
+      };
+    }
     const prevQty = prod.currentStock;
     const diff = newQuantity - prevQty;
 
@@ -103,8 +112,7 @@ export class InventoryService {
     reason: string,
     currentUser: User
   ): { success: boolean; error?: string } {
-    // FIX: Allow Admin OR Seller with canManageInventory permission
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canManageInventory) {
+    if (!isPlatformAdmin(currentUser) && !isShopAdmin(currentUser) && !currentUser.permissions?.canManageInventory) {
       return {
         success: false,
         error: 'Permission Denied: You do not have permission to perform stock-in.',
@@ -140,9 +148,14 @@ export class InventoryService {
 
   public static getMovementHistory(
     filter?: { search?: string; productId?: string; shopId?: string },
-    _currentUser?: User
+    currentUser?: User
   ): InventoryMovement[] {
     let list = db.getMovements();
+
+    if (currentUser && !isPlatformAdmin(currentUser) && isShopAdmin(currentUser)) {
+      const managedShopIds = getShopAdminShopIds(currentUser);
+      list = list.filter(m => managedShopIds.includes(m.shopId));
+    }
 
     if (filter?.shopId && filter.shopId !== 'ALL') {
       list = list.filter(m => m.shopId === filter.shopId);
@@ -165,8 +178,12 @@ export class InventoryService {
     return list;
   }
 
-  public static getInventoryValuation(shopId?: string, _currentUser?: User) {
+  public static getInventoryValuation(shopId?: string, currentUser?: User) {
     let products = db.getProducts().filter(p => p.status === 'ACTIVE');
+    if (currentUser && !isPlatformAdmin(currentUser) && isShopAdmin(currentUser)) {
+      const managedShopIds = getShopAdminShopIds(currentUser);
+      products = products.filter(p => managedShopIds.includes(p.shopId));
+    }
     if (shopId && shopId !== 'ALL') {
       products = products.filter(p => p.shopId === shopId);
     }

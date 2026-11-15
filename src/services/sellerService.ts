@@ -1,6 +1,7 @@
 import { db } from '../db/storage';
 import { User, UserStatus, SellerPermissions } from '../types';
 import { generateUUID, hashPassword } from '../utils/crypto';
+import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export class SellerService {
   /**
@@ -44,8 +45,12 @@ export class SellerService {
     },
     currentUser: User
   ): Promise<{ success: boolean; seller?: User; error?: string }> {
-    // FIX: Allow Admin OR Seller with canManageSellers permission
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canManageSellers) {
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    const managedShopIds = getShopAdminShopIds(currentUser);
+
+    // Allow Platform Admin, Shop Admin, or Seller with canManageSellers permission
+    if (!platformAdmin && !shopAdmin && !currentUser.permissions?.canManageSellers) {
       return {
         success: false,
         error: 'Permission Denied: Only Admin can create seller accounts.',
@@ -63,6 +68,25 @@ export class SellerService {
       return { success: false, error: `Username '${cleanUsername}' is already taken.` };
     }
 
+    // Scope shop assignments & permissions when created by a Shop Admin
+    let finalAssignedShopIds: string[] =
+      params.assignedShopIds && params.assignedShopIds.length > 0 ? [...params.assignedShopIds] : [];
+    let finalPermissions: SellerPermissions = { ...(params.permissions || {}) };
+
+    if (!platformAdmin) {
+      if (shopAdmin) {
+        const scoped = finalAssignedShopIds.filter(id => managedShopIds.includes(id));
+        finalAssignedShopIds = scoped.length > 0 ? scoped : managedShopIds;
+      } else {
+        const callerShops = currentUser.assignedShopIds || [];
+        const scoped = finalAssignedShopIds.filter(id => callerShops.includes(id));
+        finalAssignedShopIds = scoped.length > 0 ? scoped : callerShops;
+      }
+      // Only Platform Admin can appoint Shop Admins or grant shop-level admin management
+      delete finalPermissions.shopAdminShopIds;
+      finalPermissions.canManageShops = false;
+    }
+
     const passwordHash = await hashPassword(params.password);
     const newSeller: User = {
       id: generateUUID(),
@@ -72,12 +96,9 @@ export class SellerService {
       passwordHash,
       color: params.color || 'blue',
       status: params.status || 'ACTIVE',
-      assignedShopIds:
-        params.assignedShopIds && params.assignedShopIds.length > 0
-          ? params.assignedShopIds
-          : [],
-      avatarUrl: null,
-      permissions: params.permissions || {},
+      assignedShopIds: finalAssignedShopIds,
+      avatarUrl: undefined,
+      permissions: finalPermissions,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -135,8 +156,11 @@ export class SellerService {
     },
     currentUser: User
   ): { success: boolean; seller?: User; error?: string } {
-    // FIX: Allow Admin OR Seller with canManageSellers permission
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canManageSellers) {
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    const managedShopIds = getShopAdminShopIds(currentUser);
+
+    if (!platformAdmin && !shopAdmin && !currentUser.permissions?.canManageSellers) {
       return {
         success: false,
         error: 'Permission Denied: Only Admin can manage seller profiles.',
@@ -149,7 +173,24 @@ export class SellerService {
       return { success: false, error: 'Seller account not found.' };
     }
 
-    const seller = users[index];
+    const seller = { ...users[index] };
+
+    if (!platformAdmin) {
+      const allowedScope = shopAdmin ? managedShopIds : (currentUser.assignedShopIds || []);
+      const sharesManagedShop = (seller.assignedShopIds || []).some(id => allowedScope.includes(id));
+      if (!sharesManagedShop) {
+        return {
+          success: false,
+          error: 'Permission Denied: You can only manage sellers assigned to your shop.',
+        };
+      }
+      if (isShopAdmin(seller) && seller.id !== currentUser.id && params.status === 'INACTIVE') {
+        return {
+          success: false,
+          error: 'Only Platform Admin can deactivate another Shop Admin.',
+        };
+      }
+    }
 
     if (params.name?.trim()) {
       seller.name = params.name.trim();
@@ -164,11 +205,35 @@ export class SellerService {
     }
 
     if (params.assignedShopIds !== undefined) {
-      seller.assignedShopIds = params.assignedShopIds;
+      if (platformAdmin) {
+        seller.assignedShopIds = params.assignedShopIds;
+      } else {
+        const allowedScope = shopAdmin ? managedShopIds : (currentUser.assignedShopIds || []);
+        const externalShopIds = (seller.assignedShopIds || []).filter(id => !allowedScope.includes(id));
+        const nextManagedIds = params.assignedShopIds.filter(id => allowedScope.includes(id));
+        const mergedShopIds = Array.from(new Set([...externalShopIds, ...nextManagedIds]));
+        if (mergedShopIds.length === 0) {
+          return {
+            success: false,
+            error: 'A seller must remain assigned to at least one shop.',
+          };
+        }
+        seller.assignedShopIds = mergedShopIds;
+      }
     }
 
     if (params.permissions !== undefined) {
-      seller.permissions = params.permissions;
+      const preservedShopAdminIds = getShopAdminShopIds(seller);
+      const nextPerms: SellerPermissions = { ...params.permissions };
+      if (!platformAdmin) {
+        nextPerms.canManageShops = seller.permissions?.canManageShops ?? false;
+      }
+      if (preservedShopAdminIds.length > 0) {
+        nextPerms.shopAdminShopIds = preservedShopAdminIds;
+      } else {
+        delete nextPerms.shopAdminShopIds;
+      }
+      seller.permissions = nextPerms;
     }
 
     seller.updatedAt = new Date().toISOString();
@@ -227,8 +292,11 @@ export class SellerService {
     sellerId: string,
     currentUser: User
   ): { success: boolean; error?: string } {
-    // FIX: Allow Admin OR Seller with canManageSellers permission
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canManageSellers) {
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    const managedShopIds = getShopAdminShopIds(currentUser);
+
+    if (!platformAdmin && !shopAdmin && !currentUser.permissions?.canManageSellers) {
       return {
         success: false,
         error: 'Permission Denied: Only Admin can delete sellers.',
@@ -240,6 +308,32 @@ export class SellerService {
 
     if (!seller) {
       return { success: false, error: 'Seller not found.' };
+    }
+
+    if (!platformAdmin) {
+      if (seller.id === currentUser.id) {
+        return { success: false, error: 'You cannot delete your own account.' };
+      }
+      if (isShopAdmin(seller)) {
+        return {
+          success: false,
+          error: 'Only Platform Admin can remove a Shop Admin account.',
+        };
+      }
+      const allowedScope = shopAdmin ? managedShopIds : (currentUser.assignedShopIds || []);
+      const sellerShops = seller.assignedShopIds || [];
+      if (!sellerShops.some(id => allowedScope.includes(id))) {
+        return {
+          success: false,
+          error: 'Permission Denied: This seller does not belong to your managed shop.',
+        };
+      }
+      if (sellerShops.some(id => !allowedScope.includes(id))) {
+        return {
+          success: false,
+          error: 'This seller also works at other shops. Unassign them from your shop or contact Platform Admin.',
+        };
+      }
     }
 
     // Remove seller from users

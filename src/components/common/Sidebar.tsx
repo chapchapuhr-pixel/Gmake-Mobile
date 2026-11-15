@@ -20,6 +20,8 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { NotificationService } from '../../services/notificationService';
+import { DebtService } from '../../services/debtService';
+import { getAdminManagedShops, getEffectiveSellerPermissions, getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
 
 interface NavItem {
   id: string;
@@ -34,13 +36,23 @@ interface NavItem {
 export const Sidebar: React.FC = () => {
   const { currentUser, activeTab, setActiveTab, sellerColor, dbState } = useApp();
 
+  const isPlatformAdm = isPlatformAdmin(currentUser);
+  const isShopAdm = isShopAdmin(currentUser);
+  const showAdminMenu = isPlatformAdm || isShopAdm;
   const isSeller = currentUser?.role === 'SELLER';
-  const isAdmin = currentUser?.role === 'ADMIN';
-  const sellerPermissions = currentUser?.permissions || {};
+  const managedShopIds = getShopAdminShopIds(currentUser);
+  const assignedShopIds = currentUser?.assignedShopIds || [];
+  const scopedShopIds = isPlatformAdm
+    ? null
+    : isShopAdm
+    ? managedShopIds
+    : assignedShopIds;
+  const managedShops = getAdminManagedShops(currentUser, dbState.shops || []);
+  const sellerPermissions = getEffectiveSellerPermissions(currentUser);
 
   // Check if seller has a specific permission
   const hasPermission = (perm: keyof import('../../types').SellerPermissions): boolean => {
-    if (isAdmin) return true;
+    if (showAdminMenu) return true;
     return !!sellerPermissions[perm];
   };
 
@@ -48,20 +60,23 @@ export const Sidebar: React.FC = () => {
   const hasAnyPermission = (
     perms: (keyof import('../../types').SellerPermissions)[]
   ): boolean => {
-    if (isAdmin) return true;
+    if (showAdminMenu) return true;
     return perms.some(perm => !!sellerPermissions[perm]);
   };
 
-  // Count low-stock items
+  // Count low-stock items within user shop scope
   const lowStockCount = (dbState.products || []).filter(
-    p => p.status === 'ACTIVE' && p.currentStock <= p.minStock
+    p =>
+      p.status === 'ACTIVE' &&
+      p.currentStock <= p.minStock &&
+      (!scopedShopIds || scopedShopIds.length === 0 || scopedShopIds.includes(p.shopId))
   ).length;
 
   // Count unread notifications
   const unreadNotifsCount = NotificationService.getUnreadCount(currentUser);
 
-  // Count pending/overdue debts
-  const debts = dbState.debts || [];
+  // Count pending/overdue debts within user scope
+  const debts = DebtService.getAllDebts(currentUser || undefined);
   const overdueDebtsCount = debts.filter(d => d.status === 'OVERDUE').length;
 
   const sellerNav: NavItem[] = [
@@ -141,7 +156,7 @@ export const Sidebar: React.FC = () => {
   const adminNav: NavItem[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'new_sale', label: 'New Sale (POS)', icon: ShoppingCart },
-    { id: 'shops', label: 'Shops & Units', icon: Store, badge: (dbState.shops || []).length },
+    { id: 'shops', label: 'Shops & Units', icon: Store, badge: managedShops.length },
     { id: 'sales', label: 'Sales History', icon: History },
     {
       id: 'debts',
@@ -168,12 +183,12 @@ export const Sidebar: React.FC = () => {
     { id: 'purchases', label: 'Purchases', icon: Truck },
     { id: 'expenses', label: 'Expenses', icon: TrendingDown },
     { id: 'reports', label: 'Reports', icon: BarChart3 },
-    { id: 'data_management', label: 'Data Management', icon: Database },
+    ...(isPlatformAdm ? [{ id: 'data_management', label: 'Data Management', icon: Database }] : []),
     { id: 'settings', label: 'Settings', icon: Settings },
   ];
 
   // Filter items based on permissions
-  const items = (isSeller ? sellerNav : adminNav).filter(item => {
+  const items = (showAdminMenu ? adminNav : sellerNav).filter(item => {
     if (item.requiresPermission) {
       return hasPermission(item.requiresPermission);
     }
@@ -191,8 +206,8 @@ export const Sidebar: React.FC = () => {
       <div className="py-3">
         {/* Navigation Category Label */}
         <div className="px-4 pb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 flex items-center justify-between">
-          <span>{isSeller ? 'Seller Terminal' : 'Admin Control Panel'}</span>
-          {isAdmin && <Lock className="w-3 h-3 text-amber-400" />}
+          <span>{isPlatformAdm ? 'Admin Control Panel' : isShopAdm ? 'Shop Admin Panel' : 'Seller Terminal'}</span>
+          {showAdminMenu && <Lock className="w-3 h-3 text-amber-400" />}
         </div>
 
         {/* Menu Items */}
@@ -208,7 +223,7 @@ export const Sidebar: React.FC = () => {
                 onClick={() => setActiveTab(item.id)}
                 className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all ${
                   isActive
-                    ? 'text-white shadow-sm font-semibold'
+                    ? 'text-white shadow-sm font-medium'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
                 }`}
                 style={{

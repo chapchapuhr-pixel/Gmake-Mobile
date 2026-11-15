@@ -3,6 +3,7 @@ import { Sale, SaleItem, PaymentMethod, User, SaleEditRequest } from '../types';
 import { generateUUID } from '../utils/crypto';
 import { generateReceiptNumber } from '../utils/formatters';
 import { NotificationService } from './notificationService';
+import { canAccessShopAsAdmin, getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export interface CartItemInput {
   productId: string;
@@ -233,7 +234,7 @@ export class SalesService {
     voidReason: string,
     currentUser: User
   ): { success: boolean; error?: string } {
-    if (currentUser.role !== 'ADMIN') {
+    if (!isPlatformAdmin(currentUser) && !isShopAdmin(currentUser)) {
       return { success: false, error: 'Permission Denied: Only Admin can void a sale.' };
     }
 
@@ -245,6 +246,10 @@ export class SalesService {
     const targetSale = sales.find(s => s.id === saleId);
     if (!targetSale) {
       return { success: false, error: 'Sale record not found.' };
+    }
+
+    if (!canAccessShopAsAdmin(currentUser, targetSale.shopId)) {
+      return { success: false, error: 'Permission Denied: You can only void sales from your managed shop.' };
     }
 
     if (targetSale.status === 'VOIDED') {
@@ -389,7 +394,7 @@ export class SalesService {
     const newTotal = Number((newSubtotal - sale.discount).toFixed(2));
     const newGrossProfit = Number((newTotal - newCostOfGoods).toFixed(2));
 
-    if (currentUser.role === 'ADMIN') {
+    if (canAccessShopAsAdmin(currentUser, sale.shopId)) {
       return this.applySaleEdit(
         sale,
         {
@@ -447,9 +452,17 @@ export class SalesService {
       createdAt: new Date().toISOString(),
     });
 
-    const admins = db.getUsers().filter(u => u.role === 'ADMIN');
-    for (const admin of admins) {
-      NotificationService.notifySaleEditRequested(editRequest, admin.id);
+    const recipientIds = db
+      .getUsers()
+      .filter(
+        u =>
+          u.status === 'ACTIVE' &&
+          (u.role === 'ADMIN' || (isShopAdmin(u, sale.shopId) && (u.assignedShopIds || []).includes(sale.shopId)))
+      )
+      .map(u => u.id);
+
+    if (recipientIds.length > 0) {
+      NotificationService.notifySaleEditRequested(editRequest, recipientIds, sale.shopId, sale.shopName);
     }
 
     return { success: true, requiresApproval: true };
@@ -553,7 +566,7 @@ export class SalesService {
     currentUser: User,
     reviewNote?: string
   ): { success: boolean; error?: string } {
-    if (currentUser.role !== 'ADMIN') {
+    if (!isPlatformAdmin(currentUser) && !isShopAdmin(currentUser)) {
       return { success: false, error: 'Only admin can review sale edits.' };
     }
 
@@ -562,6 +575,13 @@ export class SalesService {
 
     if (!request) {
       return { success: false, error: 'Edit request not found.' };
+    }
+
+    const sales = db.getSales();
+    const sale = sales.find(s => s.id === request.saleId);
+
+    if (!isPlatformAdmin(currentUser) && (!sale || !isShopAdmin(currentUser, sale.shopId))) {
+      return { success: false, error: 'Permission Denied: You can only review edit requests for your managed shop.' };
     }
 
     if (request.status !== 'PENDING') {
@@ -597,8 +617,6 @@ export class SalesService {
     });
 
     if (action === 'APPROVE') {
-      const sales = db.getSales();
-      const sale = sales.find(s => s.id === request.saleId);
       if (!sale) {
         return { success: false, error: 'Sale not found.' };
       }
@@ -625,8 +643,18 @@ export class SalesService {
       return [];
     }
 
-    if (currentUser.role === 'ADMIN') {
+    if (isPlatformAdmin(currentUser)) {
       return requests;
+    }
+
+    if (isShopAdmin(currentUser)) {
+      const managedIds = getShopAdminShopIds(currentUser);
+      const sales = db.getSales();
+      return requests.filter(r => {
+        if (r.requestedByUserId === currentUser.id) return true;
+        const sale = sales.find(s => s.id === r.saleId);
+        return !!sale && managedIds.includes(sale.shopId);
+      });
     }
 
     return requests.filter(r => r.requestedByUserId === currentUser.id);
@@ -639,6 +667,7 @@ export class SalesService {
     options: {
       shopId?: string;
       sellerId?: string;
+      personalOnly?: boolean;
       search?: string;
       paymentMethod?: PaymentMethod | 'ALL';
       status?: 'ALL' | 'COMPLETED' | 'VOIDED';
@@ -654,10 +683,20 @@ export class SalesService {
       return [];
     }
 
-    if (currentUser.role === 'SELLER') {
+    if (options.personalOnly) {
       sales = sales.filter(s => s.sellerId === currentUser.id);
-    } else if (options.sellerId && options.sellerId !== 'ALL') {
-      sales = sales.filter(s => s.sellerId === options.sellerId);
+    } else if (isPlatformAdmin(currentUser)) {
+      if (options.sellerId && options.sellerId !== 'ALL') {
+        sales = sales.filter(s => s.sellerId === options.sellerId);
+      }
+    } else if (isShopAdmin(currentUser)) {
+      const managedIds = getShopAdminShopIds(currentUser);
+      sales = sales.filter(s => managedIds.includes(s.shopId));
+      if (options.sellerId && options.sellerId !== 'ALL') {
+        sales = sales.filter(s => s.sellerId === options.sellerId);
+      }
+    } else {
+      sales = sales.filter(s => s.sellerId === currentUser.id);
     }
 
     if (options.shopId && options.shopId !== 'ALL') {
@@ -704,7 +743,11 @@ export class SalesService {
       .find(s => s.receiptNumber.toLowerCase() === receiptNumber.toLowerCase());
     if (!sale) return undefined;
 
-    if (currentUser.role === 'SELLER' && sale.sellerId !== currentUser.id) {
+    if (
+      !isPlatformAdmin(currentUser) &&
+      !isShopAdmin(currentUser, sale.shopId) &&
+      sale.sellerId !== currentUser.id
+    ) {
       return undefined;
     }
     return sale;

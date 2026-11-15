@@ -9,7 +9,8 @@ import {
   Boxes,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { NotificationService } from '../../services/notificationService';
+import { DebtService } from '../../services/debtService';
+import { getShopAdminShopIds, hasAdminAccess, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
 
 interface MobileBottomNavProps {
   onOpenMenu: () => void;
@@ -20,33 +21,28 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
 
   if (!currentUser) return null;
 
-  const isSeller = currentUser.role === 'SELLER';
+  const isSeller = !hasAdminAccess(currentUser);
+  const isSellerRole = currentUser.role === 'SELLER';
+  const scopedShopIds = isPlatformAdmin(currentUser)
+    ? null
+    : isShopAdmin(currentUser)
+    ? getShopAdminShopIds(currentUser)
+    : currentUser.assignedShopIds || [];
 
-  // Count low-stock items
+  // Count low-stock items within accessible shops
   const lowStockCount = (dbState.products || []).filter(
-    p => p.status === 'ACTIVE' && p.currentStock <= p.minStock
+    p =>
+      p.status === 'ACTIVE' &&
+      p.currentStock <= p.minStock &&
+      (!scopedShopIds || scopedShopIds.length === 0 || scopedShopIds.includes(p.shopId))
   ).length;
 
-  // Count unread notifications + debts
-  const debts = dbState.debts || [];
+  // Count overdue debts within user scope
+  const debts = DebtService.getAllDebts(currentUser);
   const overdueDebtsCount = debts.filter(d => d.status === 'OVERDUE').length;
 
-  // Primary tabs for Seller:
-  // 1. Dashboard (Home)
-  // 2. Products
-  // 3. New Sale (POS) - Elevated center button
-  // 4. Debts (Madeni)
-  // 5. More (☰ Menu)
-
-  // Primary tabs for Admin:
-  // 1. Dashboard (Home)
-  // 2. Sales History
-  // 3. New Sale (POS) - Elevated center button
-  // 4. Products / Inventory
-  // 5. More (☰ Menu)
-
   const isMoreActive = isSeller
-    ? ['purchases', 'my_sales', 'notifications', 'receipts', 'settings'].includes(activeTab)
+    ? ['purchases', 'my_sales', 'notifications', 'receipts', 'sales', 'inventory', 'expenses', 'reports', 'shops', 'sellers', 'settings'].includes(activeTab)
     : ['shops', 'sellers', 'purchases', 'expenses', 'reports', 'debts', 'notifications', 'data_management', 'settings'].includes(activeTab);
 
   return (
@@ -58,9 +54,9 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
         {/* Tab 1: Dashboard */}
         <button
           onClick={() => setActiveTab('dashboard')}
-          className={`flex-1 flex flex-col items-center justify-center py-1.5 px-1 rounded-xl transition ${
+          className={`flex-1 flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
             activeTab === 'dashboard'
-              ? 'text-blue-400 font-bold'
+              ? 'text-blue-400'
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
@@ -72,9 +68,9 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
         {isSeller ? (
           <button
             onClick={() => setActiveTab('products')}
-            className={`flex-1 relative flex flex-col items-center justify-center py-1.5 px-1 rounded-xl transition ${
+            className={`flex-1 relative flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
               activeTab === 'products'
-                ? 'text-blue-400 font-bold'
+                ? 'text-blue-400'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
@@ -89,9 +85,9 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
         ) : (
           <button
             onClick={() => setActiveTab('sales')}
-            className={`flex-1 flex flex-col items-center justify-center py-1.5 px-1 rounded-xl transition ${
+            className={`flex-1 flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
               activeTab === 'sales'
-                ? 'text-blue-400 font-bold'
+                ? 'text-blue-400'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
@@ -109,11 +105,11 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
               activeTab === 'new_sale' ? 'scale-105 ring-blue-500/40' : ''
             }`}
             style={{
-              backgroundColor: isSeller ? sellerColor.primary : '#2563eb',
+              backgroundColor: isSellerRole ? sellerColor.primary : '#2563eb',
             }}
           >
             <ShoppingCart className="w-6 h-6" />
-            <span className="text-[9px] font-extrabold uppercase tracking-tighter mt-0.5">POS</span>
+            <span className="text-[9px] font-bold uppercase tracking-tighter mt-0.5">POS</span>
           </button>
         </div>
 
@@ -121,9 +117,9 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
         {isSeller ? (
           <button
             onClick={() => setActiveTab('debts')}
-            className={`flex-1 relative flex flex-col items-center justify-center py-1.5 px-1 rounded-xl transition ${
+            className={`flex-1 relative flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
               activeTab === 'debts'
-                ? 'text-blue-400 font-bold'
+                ? 'text-blue-400'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
@@ -138,9 +134,9 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
         ) : (
           <button
             onClick={() => setActiveTab('products')}
-            className={`flex-1 relative flex flex-col items-center justify-center py-1.5 px-1 rounded-xl transition ${
+            className={`flex-1 relative flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
               ['products', 'inventory'].includes(activeTab)
-                ? 'text-blue-400 font-bold'
+                ? 'text-blue-400'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
@@ -158,9 +154,9 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
         <button
           id="mobile-more-menu-btn"
           onClick={onOpenMenu}
-          className={`flex-1 flex flex-col items-center justify-center py-1.5 px-1 rounded-xl transition ${
+          className={`flex-1 flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
             isMoreActive
-              ? 'text-blue-400 font-bold'
+              ? 'text-blue-400'
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >

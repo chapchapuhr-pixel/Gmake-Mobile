@@ -16,12 +16,17 @@ import {
 import { useApp } from '../../context/AppContext';
 import { ReportService } from '../../services/reportService';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
+import { getShopAdminShopIds, hasAdminAccess, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
 
 export const AdminDashboard: React.FC = () => {
   const { currentUser, dbState, setActiveTab, showReceipt, selectedShopId, currentShop } = useApp();
   const [timeFilter, setTimeFilter] = useState<'today' | 'week' | 'month' | 'all'>('today');
 
-  if (!currentUser || currentUser.role !== 'ADMIN') return null;
+  if (!currentUser || !hasAdminAccess(currentUser)) return null;
+
+  const platformAdmin = isPlatformAdmin(currentUser);
+  const shopAdm = isShopAdmin(currentUser);
+  const managedShopIds = getShopAdminShopIds(currentUser);
 
   const settings = dbState.settings;
 
@@ -51,13 +56,17 @@ export const AdminDashboard: React.FC = () => {
     );
   }, [dateRange, selectedShopId, currentUser, dbState]);
 
-  // Inventory stats filtered by shop if specific shop is selected
+  // Inventory stats filtered by managed shops and selected shop
   const lowStockProducts = (dbState.products || []).filter(
-    p => p.status === 'ACTIVE' && p.currentStock <= p.minStock && (!selectedShopId || selectedShopId === 'ALL' || p.shopId === selectedShopId)
+    p =>
+      p.status === 'ACTIVE' &&
+      p.currentStock <= p.minStock &&
+      (platformAdmin || managedShopIds.includes(p.shopId)) &&
+      (!selectedShopId || selectedShopId === 'ALL' || p.shopId === selectedShopId)
   );
 
   const shopScopeLabel = selectedShopId === 'ALL' 
-    ? 'Company Overview (All Shops)' 
+    ? (platformAdmin ? 'Company Overview (All Shops)' : 'All Managed Shops')
     : currentShop?.name || 'Selected Shop';
 
   return (
@@ -66,14 +75,18 @@ export const AdminDashboard: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6 pb-4 border-b border-slate-800">
         <div>
           <div className="flex items-center gap-2 flex-wrap">
-            <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">Executive Business Overview</h2>
+            <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+              {platformAdmin ? 'Executive Business Overview' : 'Shop Business Overview'}
+            </h2>
             <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 text-[10px] font-bold border border-blue-500/30">
               {shopScopeLabel}
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
             {selectedShopId === 'ALL' 
-              ? 'Consolidated company-wide financial performance across all business units' 
+              ? (platformAdmin
+                  ? 'Consolidated company-wide financial performance across all business units'
+                  : 'Consolidated financial performance across your managed shops')
               : `Real-time analytics and financial metrics for ${currentShop?.name || 'selected shop'}`}
           </p>
         </div>

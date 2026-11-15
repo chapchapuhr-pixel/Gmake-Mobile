@@ -1,6 +1,7 @@
 import { db } from '../db/storage';
 import { Category, Shop, User } from '../types';
 import { generateUUID } from '../utils/crypto';
+import { canAccessShopAsAdmin, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export interface GetCategoriesOptions {
   shopId?: string;
@@ -56,11 +57,19 @@ export class CategoryService {
     data: { name: string; shopId: string; icon?: string; color?: string },
     currentUser: User
   ): { success: boolean; category?: Category; error?: string } {
-    // FIX: Allow Admin OR Seller with canEditProducts permission
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canEditProducts) {
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    if (!platformAdmin && !shopAdmin && !currentUser.permissions?.canEditProducts) {
       return {
         success: false,
         error: 'Permission Denied: You do not have permission to create categories.',
+      };
+    }
+
+    if (!platformAdmin && shopAdmin && !canAccessShopAsAdmin(currentUser, data.shopId?.trim())) {
+      return {
+        success: false,
+        error: 'Permission Denied: You can only create categories for your managed shop.',
       };
     }
 
@@ -149,8 +158,9 @@ export class CategoryService {
     },
     currentUser: User
   ): { success: boolean; category?: Category; error?: string } {
-    // FIX: Allow Admin OR Seller with canEditProducts permission
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canEditProducts) {
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    if (!platformAdmin && !shopAdmin && !currentUser.permissions?.canEditProducts) {
       return {
         success: false,
         error: 'Permission Denied: You do not have permission to edit categories.',
@@ -165,6 +175,14 @@ export class CategoryService {
 
     const current = categories[index];
     const targetShopId = data.shopId || current.shopId;
+
+    if (!platformAdmin && shopAdmin && (!canAccessShopAsAdmin(currentUser, current.shopId) || !canAccessShopAsAdmin(currentUser, targetShopId))) {
+      return {
+        success: false,
+        error: 'Permission Denied: You can only edit categories belonging to your managed shop.',
+      };
+    }
+
     const targetName = data.name !== undefined ? data.name.trim() : current.name;
 
     if (!targetName) {

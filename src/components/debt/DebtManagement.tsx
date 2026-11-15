@@ -4,6 +4,11 @@ import { DebtService } from '../../services/debtService';
 import { DebtRecord, DebtType, DebtStatus, DebtPayment } from '../../types';
 import { formatCurrency, formatDate, formatDateTime } from '../../utils/formatters';
 import {
+  getAdminManagedShops,
+  isPlatformAdmin,
+  isShopAdmin,
+} from '../../utils/permissions';
+import {
   DollarSign,
   Plus,
   Search,
@@ -35,7 +40,7 @@ import {
 const PAGE_SIZE = 10;
 
 export const DebtManagement: React.FC = () => {
-  const { currentUser, dbState, addToast } = useApp();
+  const { currentUser, dbState, addToast, currentShop, selectedShopId, availableShops } = useApp();
   const settings = dbState.settings;
 
   // Active type filter
@@ -60,12 +65,23 @@ export const DebtManagement: React.FC = () => {
 
   // Form State
   const [formType, setFormType] = useState<DebtType>('WE_DEMAND');
+  const [formShopId, setFormShopId] = useState('');
   const [formName, setFormName] = useState('');
   const [formProduct, setFormProduct] = useState('');
   const [formAmount, setFormAmount] = useState('');
   const [formDueDate, setFormDueDate] = useState('');
   const [formContact, setFormContact] = useState('');
   const [formNotes, setFormNotes] = useState('');
+
+  const platformAdmin = isPlatformAdmin(currentUser || undefined);
+  const shopAdmin = isShopAdmin(currentUser || undefined);
+  const assignableShops = useMemo(() => {
+    const allShops = dbState.shops || [];
+    if (!currentUser) return [];
+    if (platformAdmin) return allShops;
+    if (shopAdmin) return getAdminManagedShops(currentUser, allShops);
+    return availableShops;
+  }, [currentUser, dbState.shops, platformAdmin, shopAdmin, availableShops]);
 
   // Payment Form State
   const [paymentAmountInput, setPaymentAmountInput] = useState<string>('');
@@ -190,6 +206,17 @@ export const DebtManagement: React.FC = () => {
   const openCreateModal = (type: DebtType = 'WE_DEMAND') => {
     setEditingDebt(null);
     setFormType(type);
+    const defaultShopId =
+      (currentShop?.id && assignableShops.some(s => s.id === currentShop.id)
+        ? currentShop.id
+        : undefined) ||
+      (selectedShopId !== 'ALL' && assignableShops.some(s => s.id === selectedShopId)
+        ? selectedShopId
+        : undefined) ||
+      assignableShops[0]?.id ||
+      currentUser?.assignedShopIds?.[0] ||
+      '';
+    setFormShopId(defaultShopId);
     setFormName('');
     setFormProduct('');
     setFormAmount('');
@@ -203,6 +230,7 @@ export const DebtManagement: React.FC = () => {
   const openEditModal = (debt: DebtRecord) => {
     setEditingDebt(debt);
     setFormType(debt.type);
+    setFormShopId(debt.shopId || assignableShops[0]?.id || '');
     setFormName(debt.debtorName);
     setFormProduct(debt.productDescription || '');
     setFormAmount(debt.amount.toString());
@@ -243,14 +271,22 @@ export const DebtManagement: React.FC = () => {
       return;
     }
 
+    const resolvedShopId =
+      formShopId ||
+      currentShop?.id ||
+      (selectedShopId !== 'ALL' ? selectedShopId : undefined) ||
+      assignableShops[0]?.id ||
+      currentUser.assignedShopIds?.[0];
+
     if (editingDebt) {
       const currentPaid = editingDebt.paidAmount || 0;
       const newRemaining = Math.max(0, amt - currentPaid);
 
-      DebtService.updateDebt(
+      const ok = DebtService.updateDebt(
         editingDebt.id,
         {
           type: formType,
+          shopId: resolvedShopId || editingDebt.shopId,
           debtorName: formName.trim(),
           productDescription: formProduct.trim() || undefined,
           amount: amt,
@@ -275,6 +311,15 @@ export const DebtManagement: React.FC = () => {
         currentUser
       );
 
+      if (!ok) {
+        addToast({
+          type: 'error',
+          title: 'Huna Ruhusa / Permission Denied',
+          description: 'Huwezi kuhariri deni hili.',
+        });
+        return;
+      }
+
       addToast({
         type: 'success',
         title: 'Deni Limesasishwa / Debt Updated',
@@ -284,6 +329,7 @@ export const DebtManagement: React.FC = () => {
       DebtService.createDebt(
         {
           type: formType,
+          shopId: resolvedShopId,
           debtorName: formName.trim(),
           productDescription: formProduct.trim() || undefined,
           amount: amt,
@@ -383,13 +429,21 @@ export const DebtManagement: React.FC = () => {
   const handleConfirmDelete = () => {
     if (!deletingDebt || !currentUser) return;
 
-    DebtService.deleteDebt(deletingDebt.id, currentUser);
+    const deleted = DebtService.deleteDebt(deletingDebt.id, currentUser);
 
-    addToast({
-      type: 'info',
-      title: 'Deni Limefutwa',
-      description: `Rekodi ya ${deletingDebt.debtorName} imefutwa.`,
-    });
+    if (deleted) {
+      addToast({
+        type: 'info',
+        title: 'Deni Limefutwa',
+        description: `Rekodi ya ${deletingDebt.debtorName} imefutwa.`,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Imeshindikana Kufuta',
+        description: 'Huna ruhusa ya kufuta deni hili.',
+      });
+    }
 
     setDeletingDebt(null);
   };
@@ -435,6 +489,15 @@ export const DebtManagement: React.FC = () => {
               <h4 className="font-bold text-xs text-white truncate">
                 {debt.debtorName}
               </h4>
+              {debt.shopId && (() => {
+                const shopName = dbState.shops.find(s => s.id === debt.shopId)?.name;
+                if (!shopName) return null;
+                return (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-blue-950/70 text-blue-300 border border-blue-800/40 text-[9px] font-medium">
+                    🏪 {shopName}
+                  </span>
+                );
+              })()}
             </div>
             {debt.contact && (
               <div className="flex items-center gap-1 font-mono text-[10px] text-slate-400 mt-0.5">
@@ -1083,6 +1146,26 @@ export const DebtManagement: React.FC = () => {
                   </button>
                 </div>
               </div>
+
+              {assignableShops.length > 0 && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Duka / Shop
+                  </label>
+                  <select
+                    value={formShopId}
+                    onChange={e => setFormShopId(e.target.value)}
+                    disabled={assignableShops.length === 1 && !platformAdmin}
+                    className="w-full bg-slate-950 text-xs text-white px-3 py-2.5 rounded-lg border border-slate-800 focus:outline-none focus:border-emerald-500 disabled:opacity-75"
+                  >
+                    {assignableShops.map(s => (
+                      <option key={s.id} value={s.id}>
+                        🏪 {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">

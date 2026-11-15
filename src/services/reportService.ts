@@ -1,5 +1,6 @@
 import { db } from '../db/storage';
 import { User, Sale } from '../types';
+import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export class ReportService {
   public static getSellerDashboardSummary(sellerId: string, shopId?: string) {
@@ -55,7 +56,11 @@ export class ReportService {
       throw new Error('Permission Denied: User not found.');
     }
 
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canViewReports) {
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    const managedShopIds = getShopAdminShopIds(currentUser);
+
+    if (!platformAdmin && !shopAdmin && !currentUser.permissions?.canViewReports) {
       throw new Error(
         'Permission Denied: Financial reporting is restricted to Administrators.'
       );
@@ -63,12 +68,18 @@ export class ReportService {
 
     const allSales = (db.getSales() || []).filter(s => s.status === 'COMPLETED');
     const allExpenses = db.getExpenses() || [];
-    const shops = db.getShops() || [];
+    const allShops = db.getShops() || [];
+    const shops = !platformAdmin && shopAdmin ? allShops.filter(s => managedShopIds.includes(s.id)) : allShops;
     const products = db.getProducts() || [];
 
     // Filter by shop if specified
     let filteredSales = allSales;
     let filteredExpenses = allExpenses;
+
+    if (!platformAdmin && shopAdmin) {
+      filteredSales = filteredSales.filter(s => managedShopIds.includes(s.shopId));
+      filteredExpenses = filteredExpenses.filter(e => !!e.shopId && managedShopIds.includes(e.shopId));
+    }
 
     if (options.shopId && options.shopId !== 'ALL') {
       filteredSales = filteredSales.filter(s => s.shopId === options.shopId);
@@ -79,8 +90,8 @@ export class ReportService {
       filteredSales = filteredSales.filter(s => s.sellerId === options.sellerId);
     }
 
-    // If seller (not admin) without full access, only show their own sales
-    if (currentUser.role === 'SELLER' && !currentUser.permissions?.canViewReports) {
+    // If seller (not admin/shop-admin) without full access, only show their own sales
+    if (!platformAdmin && !shopAdmin && !currentUser.permissions?.canViewReports) {
       filteredSales = filteredSales.filter(s => s.sellerId === currentUser.id);
     }
 

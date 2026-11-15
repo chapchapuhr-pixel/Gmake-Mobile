@@ -28,6 +28,7 @@ import { CloudflareApi } from '../../services/cloudflareApi';
 import { User, SellerPermissions } from '../../types';
 import { SELLER_COLORS, getSellerColorById } from '../../utils/colors';
 import { formatCurrency } from '../../utils/formatters';
+import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
 
 // ─────────────────────────────────────────────────────────────
 // Permission metadata (single source of truth)
@@ -73,9 +74,13 @@ const badgeClassFor = (color: string) => {
 const PermissionsSelector: React.FC<{
   permissions: SellerPermissions;
   onToggle: (key: PermissionKey) => void;
-}> = ({ permissions, onToggle }) => {
+  hidePlatformOnly?: boolean;
+}> = ({ permissions, onToggle, hidePlatformOnly = false }) => {
   const [expanded, setExpanded] = useState(false);
-  const grantedCount = Object.values(permissions).filter(Boolean).length;
+  const visibleDefs = hidePlatformOnly
+    ? PERMISSION_DEFS.filter(d => d.key !== 'canManageShops')
+    : PERMISSION_DEFS;
+  const grantedCount = visibleDefs.filter(d => !!permissions[d.key]).length;
 
   return (
     <div className="rounded-xl bg-slate-950 border border-slate-800 overflow-hidden">
@@ -88,7 +93,7 @@ const PermissionsSelector: React.FC<{
           <Shield className="w-3.5 h-3.5 text-blue-400" />
           Permissions Granted
           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 font-mono">
-            {grantedCount}/{PERMISSION_DEFS.length}
+            {grantedCount}/{visibleDefs.length}
           </span>
         </span>
         {expanded ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
@@ -96,7 +101,7 @@ const PermissionsSelector: React.FC<{
 
       {expanded && (
         <div className="border-t border-slate-800 p-2 space-y-1 max-h-64 overflow-y-auto">
-          {PERMISSION_DEFS.map(def => {
+          {visibleDefs.map(def => {
             const enabled = !!permissions[def.key];
             return (
               <label
@@ -268,10 +273,27 @@ export const AdminSellers: React.FC = () => {
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
   if (!currentUser) return null;
-  if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canManageSellers) return null;
+  const platformAdmin = isPlatformAdmin(currentUser);
+  const shopAdm = isShopAdmin(currentUser);
+  if (!platformAdmin && !shopAdm && !currentUser.permissions?.canManageSellers) return null;
 
-  const sellers = dbState.users.filter(u => u.role === 'SELLER');
+  const managedShopIds = getShopAdminShopIds(currentUser);
+  const allowedShopIds = platformAdmin
+    ? null
+    : shopAdm
+    ? managedShopIds
+    : currentUser.assignedShopIds || [];
+
   const allShops = dbState.shops || [];
+  const manageableShops = allowedShopIds
+    ? allShops.filter(sh => allowedShopIds.includes(sh.id))
+    : allShops;
+
+  const sellers = dbState.users.filter(u => {
+    if (u.role !== 'SELLER') return false;
+    if (!allowedShopIds) return true;
+    return (u.assignedShopIds || []).some(id => allowedShopIds.includes(id));
+  });
 
   // ── Image helpers ──────────────────────────────────────────
   const compressImage = (file: File, maxWidth: number, maxHeight: number): Promise<Blob> =>
@@ -345,8 +367,14 @@ export const AdminSellers: React.FC = () => {
     setUsername('');
     setPassword('');
     setSelectedColor('blue');
-    const activeShopIds = allShops.filter(s => s.status === 'ACTIVE').map(s => s.id);
-    setAssignedShopIds(activeShopIds.length > 0 ? [activeShopIds[0]] : []);
+    const activeScopedIds = manageableShops.filter(s => s.status === 'ACTIVE').map(s => s.id);
+    if (activeScopedIds.length > 0) {
+      setAssignedShopIds(platformAdmin ? [activeScopedIds[0]] : activeScopedIds);
+    } else if (manageableShops.length > 0) {
+      setAssignedShopIds([manageableShops[0].id]);
+    } else {
+      setAssignedShopIds([]);
+    }
     setSellerPermissions({});
     setFormError('');
     setIsAddModalOpen(true);
@@ -356,7 +384,10 @@ export const AdminSellers: React.FC = () => {
     setSelectedSeller(s);
     setName(s.name);
     setSelectedColor(s.color || 'blue');
-    setAssignedShopIds(s.assignedShopIds || []);
+    const scopedSelection = allowedShopIds
+      ? (s.assignedShopIds || []).filter(id => allowedShopIds.includes(id))
+      : s.assignedShopIds || [];
+    setAssignedShopIds(scopedSelection);
     setSellerPermissions(s.permissions || {});
     setFormError('');
     setIsEditModalOpen(true);
@@ -456,6 +487,12 @@ export const AdminSellers: React.FC = () => {
         title: `Seller ${newStatus === 'ACTIVE' ? 'Activated' : 'Deactivated'}`,
         description: `${s.name} is now ${newStatus}. Historical data preserved.`,
       });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Status Change Blocked',
+        description: res.error || 'Could not change seller status.',
+      });
     }
   };
 
@@ -519,6 +556,10 @@ export const AdminSellers: React.FC = () => {
             (sum, s) => (s.status === 'COMPLETED' ? sum + s.total : sum),
             0
           );
+          const sellerShopAdminIds = getShopAdminShopIds(seller);
+          const sellerShopAdminNames = allShops
+            .filter(sh => sellerShopAdminIds.includes(sh.id))
+            .map(sh => sh.name);
           const granted = PERMISSION_DEFS.filter(d => seller.permissions?.[d.key]);
 
           return (
@@ -568,15 +609,23 @@ export const AdminSellers: React.FC = () => {
                   <div className="min-w-0 flex-1">
                     <h3 className="font-bold text-white text-xs sm:text-sm truncate pr-1">{seller.name}</h3>
                     <p className="text-[11px] sm:text-xs text-slate-400 font-mono truncate">@{seller.username}</p>
-                    <span
-                      className={`inline-block mt-1 px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-bold ${
-                        isActive
-                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                          : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                      }`}
-                    >
-                      {seller.status}
-                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                      <span
+                        className={`inline-block px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-bold ${
+                          isActive
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                            : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                        }`}
+                      >
+                        {seller.status}
+                      </span>
+                      {sellerShopAdminIds.length > 0 && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                          <Shield className="w-2.5 h-2.5" />
+                          Shop Admin{sellerShopAdminNames.length > 0 ? `: ${sellerShopAdminNames.join(', ')}` : ''}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -756,10 +805,12 @@ export const AdminSellers: React.FC = () => {
               <div>
                 <label className="block text-slate-300 font-semibold mb-1.5 flex items-center justify-between">
                   <span>Assigned Shop Units *</span>
-                  <span className="text-[10px] text-slate-400 font-normal">Select one or more</span>
+                  <span className="text-[10px] text-slate-400 font-normal">
+                    {platformAdmin ? 'Select one or more' : 'Auto-scoped to your shop'}
+                  </span>
                 </label>
                 <div className="space-y-1.5 max-h-36 overflow-y-auto p-2 rounded-lg bg-slate-950 border border-slate-800">
-                  {allShops.map(sh => (
+                  {manageableShops.map(sh => (
                     <label key={sh.id} className="flex items-center gap-2.5 p-2 rounded hover:bg-slate-900 cursor-pointer active:bg-slate-800/80">
                       <input type="checkbox" checked={assignedShopIds.includes(sh.id)} onChange={() => toggleShopSelection(sh.id)}
                         className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-blue-600 focus:ring-blue-500" />
@@ -772,7 +823,7 @@ export const AdminSellers: React.FC = () => {
                 </div>
               </div>
 
-              <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} />
+              <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} hidePlatformOnly={!platformAdmin} />
 
               <div>
                 <label className="block text-slate-300 font-medium mb-1.5">Signature Color Theme</label>
@@ -825,10 +876,12 @@ export const AdminSellers: React.FC = () => {
               <div>
                 <label className="block text-slate-300 font-semibold mb-1.5 flex items-center justify-between">
                   <span>Assigned Shop Units *</span>
-                  <span className="text-[10px] text-slate-400 font-normal">Check all shops seller can access</span>
+                  <span className="text-[10px] text-slate-400 font-normal">
+                    {platformAdmin ? 'Check all shops seller can access' : 'Managed shop assignment'}
+                  </span>
                 </label>
                 <div className="space-y-1.5 max-h-36 overflow-y-auto p-2 rounded-lg bg-slate-950 border border-slate-800">
-                  {allShops.map(sh => (
+                  {manageableShops.map(sh => (
                     <label key={sh.id} className="flex items-center gap-2.5 p-2 rounded hover:bg-slate-900 cursor-pointer active:bg-slate-800/80">
                       <input type="checkbox" checked={assignedShopIds.includes(sh.id)} onChange={() => toggleShopSelection(sh.id)}
                         className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-blue-600 focus:ring-blue-500" />
@@ -839,9 +892,15 @@ export const AdminSellers: React.FC = () => {
                     </label>
                   ))}
                 </div>
+                {!platformAdmin &&
+                  (selectedSeller.assignedShopIds || []).some(id => allowedShopIds && !allowedShopIds.includes(id)) && (
+                    <p className="text-[10px] text-amber-300/90 mt-1">
+                      Note: This seller is also assigned to other platform shops (preserved automatically).
+                    </p>
+                  )}
               </div>
 
-              <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} />
+              <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} hidePlatformOnly={!platformAdmin} />
 
               <div>
                 <label className="block text-slate-300 font-medium mb-1.5">Signature Color Theme</label>

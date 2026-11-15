@@ -15,11 +15,15 @@ import {
   FileText,
   AlertTriangle,
   Info,
+  Shield,
+  UserCheck,
+  UserX,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ShopService } from '../../services/shopService';
-import { Shop, ShopStatus } from '../../types';
+import { Shop, ShopStatus, User } from '../../types';
 import { formatCurrency, formatDate } from '../../utils/formatters';
+import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
 
 export const AdminShops: React.FC = () => {
   const { currentUser, dbState, addToast, setSelectedShopId, setActiveTab } = useApp();
@@ -32,6 +36,12 @@ export const AdminShops: React.FC = () => {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [editingShop, setEditingShop] = useState<Shop | null>(null);
   const [deactivatingShop, setDeactivatingShop] = useState<Shop | null>(null);
+  const [shopAdminModalShop, setShopAdminModalShop] = useState<Shop | null>(null);
+  const [selectedAdminSellerId, setSelectedAdminSellerId] = useState<string>('');
+
+  const platformAdmin = isPlatformAdmin(currentUser);
+  const shopAdm = isShopAdmin(currentUser);
+  const managedShopIds = getShopAdminShopIds(currentUser);
 
   // Form inputs
   const [formData, setFormData] = useState({
@@ -43,12 +53,22 @@ export const AdminShops: React.FC = () => {
     status: 'ACTIVE' as ShopStatus,
   });
 
+  const accessibleAllShops = useMemo(() => {
+    const all = dbState.shops || [];
+    if (platformAdmin) return all;
+    if (shopAdm) return all.filter(s => managedShopIds.includes(s.id));
+    return [];
+  }, [dbState.shops, platformAdmin, shopAdm, managedShopIds]);
+
   const shops = useMemo(() => {
-    return ShopService.getShops({
+    const base = ShopService.getShops({
       status: statusFilter,
       search,
     });
-  }, [dbState.shops, statusFilter, search]);
+    if (platformAdmin) return base;
+    if (shopAdm) return base.filter(s => managedShopIds.includes(s.id));
+    return [];
+  }, [dbState.shops, statusFilter, search, platformAdmin, shopAdm, managedShopIds]);
 
   // Compute metrics per shop
   const shopMetrics = useMemo(() => {
@@ -195,10 +215,50 @@ export const AdminShops: React.FC = () => {
     }
   };
 
+  const handleOpenSetShopAdmin = (shop: Shop) => {
+    const currentShopAdmin = ShopService.getShopAdmin(shop.id);
+    setShopAdminModalShop(shop);
+    setSelectedAdminSellerId(currentShopAdmin?.id || '');
+  };
+
+  const handleSaveShopAdmin = (sellerIdToAssign: string | null) => {
+    if (!currentUser || !shopAdminModalShop) return;
+    const res = ShopService.setShopAdmin(shopAdminModalShop.id, sellerIdToAssign, currentUser);
+    if (res.success) {
+      const assignedSeller = sellerIdToAssign
+        ? (dbState.users || []).find(u => u.id === sellerIdToAssign)
+        : undefined;
+      addToast({
+        type: 'success',
+        title: assignedSeller ? 'Shop Admin Assigned' : 'Shop Admin Removed',
+        description: assignedSeller
+          ? `${assignedSeller.name} now manages ${shopAdminModalShop.name} with full shop-scoped admin access.`
+          : `Shop Admin role removed from ${shopAdminModalShop.name}.`,
+      });
+      setShopAdminModalShop(null);
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Assignment Failed',
+        description: res.error || 'Could not update Shop Admin.',
+      });
+    }
+  };
+
   const handleSelectAndJump = (shopId: string, tab: string) => {
     setSelectedShopId(shopId);
     setActiveTab(tab);
   };
+
+  const eligibleSellersForModal: User[] = useMemo(() => {
+    if (!shopAdminModalShop) return [];
+    return (dbState.users || []).filter(
+      u =>
+        u.role === 'SELLER' &&
+        u.status === 'ACTIVE' &&
+        (u.assignedShopIds || []).includes(shopAdminModalShop.id)
+    );
+  }, [dbState.users, shopAdminModalShop]);
 
   return (
     <div
@@ -214,18 +274,22 @@ export const AdminShops: React.FC = () => {
               <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">Shops & Units</h2>
             </div>
             <p className="text-xs text-slate-400 mt-1">
-              Manage multiple independent retail units under {settings.businessName}. Products, Inventory, Sales, Expenses, and Sellers are isolated per shop.
+              {platformAdmin
+                ? `Manage multiple independent retail units under ${settings.businessName} and designate a Shop Admin from each shop's sellers.`
+                : `Manage your designated shop unit${managedShopIds.length > 1 ? 's' : ''} under ${settings.businessName}.`}
             </p>
           </div>
 
-          <button
-            id="btn-create-new-shop"
-            onClick={handleOpenCreate}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-3.5 py-2 rounded-xl shadow-sm transition self-start sm:self-auto"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add New Shop</span>
-          </button>
+          {platformAdmin && (
+            <button
+              id="btn-create-new-shop"
+              onClick={handleOpenCreate}
+              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-3.5 py-2 rounded-xl shadow-sm transition self-start sm:self-auto"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add New Shop</span>
+            </button>
+          )}
         </div>
 
         {/* Filter and Search Bar */}
@@ -250,7 +314,7 @@ export const AdminShops: React.FC = () => {
               onChange={e => setStatusFilter(e.target.value as any)}
               className="bg-slate-950 text-xs text-slate-200 px-2.5 py-2 rounded-lg border border-slate-800 focus:outline-none focus:border-blue-500 flex-1 sm:flex-initial"
             >
-              <option value="ALL">All Statuses ({(dbState.shops || []).length})</option>
+              <option value="ALL">All Statuses ({accessibleAllShops.length})</option>
               <option value="ACTIVE">Active Only</option>
               <option value="INACTIVE">Inactive Only</option>
             </select>
@@ -270,6 +334,7 @@ export const AdminShops: React.FC = () => {
             };
 
             const isActive = shop.status === 'ACTIVE';
+            const shopAdminUser = ShopService.getShopAdmin(shop.id);
 
             return (
               <div
@@ -332,6 +397,50 @@ export const AdminShops: React.FC = () => {
                     )}
                     {!shop.address && !shop.phone && (
                       <span className="text-slate-600 italic">No address/phone configured</span>
+                    )}
+                  </div>
+
+                  {/* Shop Admin Designation Row */}
+                  <div className="mt-2.5 pt-2.5 border-t border-slate-800/50 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Shield
+                        className={`w-3.5 h-3.5 shrink-0 ${
+                          shopAdminUser ? 'text-emerald-400' : 'text-slate-500'
+                        }`}
+                      />
+                      {shopAdminUser ? (
+                        <div className="min-w-0">
+                          <div className="text-[10px] text-slate-400 font-medium leading-none mb-0.5">
+                            Shop Admin
+                          </div>
+                          <div className="text-xs font-semibold text-emerald-300 truncate">
+                            {shopAdminUser.name}{' '}
+                            <span className="text-[10px] font-mono text-slate-400">
+                              (@{shopAdminUser.username})
+                            </span>
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-[11px] text-slate-500 italic truncate">
+                          No Shop Admin set
+                        </span>
+                      )}
+                    </div>
+
+                    {platformAdmin && (
+                      <button
+                        id={`btn-set-shop-admin-${shop.id}`}
+                        type="button"
+                        onClick={() => handleOpenSetShopAdmin(shop)}
+                        className={`shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition flex items-center gap-1 ${
+                          shopAdminUser
+                            ? 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                            : 'bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 border-blue-500/30'
+                        }`}
+                      >
+                        <UserCheck className="w-3 h-3" />
+                        <span>{shopAdminUser ? 'Change Admin' : 'Set Admin'}</span>
+                      </button>
                     )}
                   </div>
                 </div>
@@ -413,7 +522,7 @@ export const AdminShops: React.FC = () => {
                 ? 'No business units match your query.'
                 : 'Your workspace has a clean slate. Create your first shop, branch, or retail unit to begin adding inventory, sellers, and processing sales.'}
             </p>
-            {!search && (
+            {!search && platformAdmin && (
               <button
                 onClick={handleOpenCreate}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-lg transition"
@@ -600,6 +709,130 @@ export const AdminShops: React.FC = () => {
                   >
                     {deactivatingShop.status === 'ACTIVE' ? 'Confirm Deactivation' : 'Reactivate Shop'}
                   </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* SET / CHANGE SHOP ADMIN MODAL */}
+        {platformAdmin && shopAdminModalShop && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3.5 sm:p-4 backdrop-blur-xs">
+            <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150 max-h-[92vh] flex flex-col">
+              <div className="flex items-center justify-between px-4 sm:px-5 py-3.5 border-b border-slate-800 bg-slate-950 shrink-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Shield className="w-5 h-5 text-emerald-400 shrink-0" />
+                  <h3 className="font-bold text-xs sm:text-sm text-white truncate">
+                    Shop Admin — {shopAdminModalShop.name}
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setShopAdminModalShop(null)}
+                  className="text-slate-400 hover:text-white p-1 rounded-lg"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="p-4 sm:p-5 space-y-4 overflow-y-auto text-xs">
+                <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-200/90 leading-relaxed">
+                  Choose an active seller assigned to <strong className="text-white">{shopAdminModalShop.name}</strong>. The designated Shop Admin receives full admin permissions (products, stock, sales, expenses, debts, reports, and adding sellers under <strong className="text-white">{shopAdminModalShop.name}</strong>) strictly scoped to this shop.
+                </div>
+
+                {eligibleSellersForModal.length === 0 ? (
+                  <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-center space-y-3">
+                    <Users className="w-8 h-8 text-slate-600 mx-auto" />
+                    <div className="text-slate-300 font-semibold">
+                      No Active Sellers Assigned to {shopAdminModalShop.name}
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      Create or assign an active seller to {shopAdminModalShop.name} first before selecting a Shop Admin.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShopAdminModalShop(null);
+                        setActiveTab('sellers');
+                      }}
+                      className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition"
+                    >
+                      Go to Sellers
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                      Select Shop Seller ({eligibleSellersForModal.length} available)
+                    </label>
+                    <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                      {eligibleSellersForModal.map(seller => {
+                        const isSelected = selectedAdminSellerId === seller.id;
+                        const isCurrentAdmin = getShopAdminShopIds(seller).includes(shopAdminModalShop.id);
+                        return (
+                          <label
+                            key={seller.id}
+                            className={`flex items-center justify-between gap-3 p-3 rounded-xl border cursor-pointer transition ${
+                              isSelected
+                                ? 'bg-emerald-500/15 border-emerald-500/50 text-white'
+                                : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <input
+                                type="radio"
+                                name="shop-admin-seller"
+                                checked={isSelected}
+                                onChange={() => setSelectedAdminSellerId(seller.id)}
+                                className="text-emerald-500 focus:ring-emerald-500"
+                              />
+                              <div className="min-w-0">
+                                <div className="font-semibold text-white truncate">{seller.name}</div>
+                                <div className="text-[10px] font-mono text-slate-400">@{seller.username}</div>
+                              </div>
+                            </div>
+                            {isCurrentAdmin && (
+                              <span className="shrink-0 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold">
+                                Current Admin
+                              </span>
+                            )}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="px-4 sm:px-5 py-3.5 border-t border-slate-800 bg-slate-950/60 flex items-center justify-between gap-2 shrink-0">
+                <div>
+                  {ShopService.getShopAdmin(shopAdminModalShop.id) && (
+                    <button
+                      type="button"
+                      onClick={() => handleSaveShopAdmin(null)}
+                      className="px-3 py-2 rounded-lg text-xs font-semibold text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 transition flex items-center gap-1"
+                    >
+                      <UserX className="w-3.5 h-3.5" />
+                      <span>Remove Admin</span>
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShopAdminModalShop(null)}
+                    className="px-3.5 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                  >
+                    Cancel
+                  </button>
+                  {eligibleSellersForModal.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={!selectedAdminSellerId}
+                      onClick={() => handleSaveShopAdmin(selectedAdminSellerId)}
+                      className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-semibold transition"
+                    >
+                      Save Shop Admin
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

@@ -21,6 +21,12 @@ import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import { Product } from '../../types';
 import { ProductThumbnail } from '../common/ProductThumbnail';
 import { ProductImageViewerModal } from '../common/ProductImageViewerModal';
+import {
+  getAdminManagedShops,
+  hasAdminAccess,
+  isPlatformAdmin,
+  isShopAdmin,
+} from '../../utils/permissions';
 
 const PAGE_SIZE = 10;
 
@@ -58,10 +64,23 @@ export const AdminInventory: React.FC = () => {
   const [modalError, setModalError] = useState('');
 
   if (!currentUser) return null;
-  if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canManageInventory) return null;
+  if (!hasAdminAccess(currentUser) && !currentUser.permissions?.canManageInventory) return null;
 
+  const platformAdmin = isPlatformAdmin(currentUser);
+  const shopAdmin = isShopAdmin(currentUser);
   const settings = dbState.settings;
-  const shops = dbState.shops || [];
+  const allShops = dbState.shops || [];
+  const shops = platformAdmin
+    ? allShops
+    : shopAdmin
+      ? getAdminManagedShops(currentUser, allShops)
+      : allShops.filter(s => (currentUser.assignedShopIds || []).includes(s.id));
+  const visibleShopIdSet = new Set(shops.map(s => s.id));
+  const visibleProducts = (dbState.products || []).filter(
+    p => platformAdmin || (!!p.shopId && visibleShopIdSet.has(p.shopId))
+  );
+  const visibleProductIds = new Set(visibleProducts.map(p => p.id));
+
   const valuation = InventoryService.getInventoryValuation(selectedShopId, currentUser);
   const allMovements = InventoryService.getMovementHistory(
     {
@@ -76,7 +95,7 @@ export const AdminInventory: React.FC = () => {
     return m.type === movementTypeFilter;
   });
 
-  const products = dbState.products.filter(p => {
+  const products = visibleProducts.filter(p => {
     const matchesShop = selectedShopId === 'ALL' || p.shopId === selectedShopId;
     const q = searchQuery.toLowerCase().trim();
     const matchesSearch = !q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q);
@@ -92,12 +111,12 @@ export const AdminInventory: React.FC = () => {
     }))
     .filter(group => group.products.length > 0);
 
-  const productsWithNoShop = products.filter(
-    p => !shops.some(s => s.id === p.shopId)
-  );
+  const productsWithNoShop = platformAdmin
+    ? products.filter(p => !shops.some(s => s.id === p.shopId))
+    : [];
 
-  // Global low stock products (across all shops)
-  const allLowStockProducts = dbState.products.filter(
+  // Low stock products (scoped to visible/managed shops)
+  const allLowStockProducts = visibleProducts.filter(
     p => p.status === 'ACTIVE' && p.currentStock <= p.minStock
   );
 
@@ -139,13 +158,15 @@ export const AdminInventory: React.FC = () => {
     }));
   };
 
-  const selectedProduct = dbState.products.find(p => p.id === selectedProductId);
+  const selectedProduct = visibleProducts.find(p => p.id === selectedProductId);
   const inputQty = parseInt(quantityInput, 10) || 0;
   const calculatedLossValue = selectedProduct ? inputQty * (selectedProduct.purchasePrice || 0) : 0;
 
-  // Loss movements
-  const lossMovements = (dbState.movements || []).filter(m =>
-    ['DAMAGED', 'BROKEN', 'EXPIRED', 'LOST'].includes(m.type)
+  // Loss movements (scoped to visible/managed shops)
+  const lossMovements = (dbState.movements || []).filter(
+    m =>
+      ['DAMAGED', 'BROKEN', 'EXPIRED', 'LOST'].includes(m.type) &&
+      (platformAdmin || (m.shopId ? visibleShopIdSet.has(m.shopId) : visibleProductIds.has(m.productId)))
   );
 
   const filteredLosses = lossMovements.filter(m => {
@@ -172,7 +193,7 @@ export const AdminInventory: React.FC = () => {
     e.preventDefault();
     setModalError('');
 
-    const targetProduct = dbState.products.find(p => p.id === selectedProductId);
+    const targetProduct = visibleProducts.find(p => p.id === selectedProductId);
     if (!targetProduct) {
       setModalError('Please select a valid product.');
       return;
@@ -302,7 +323,13 @@ export const AdminInventory: React.FC = () => {
         <div class="header">
           <h1>📦 Low Stock & Restock Report</h1>
           <div class="company">${settings.businessName}</div>
-          <div class="meta">Generated: ${new Date().toLocaleString()} • All Shops Combined</div>
+          <div class="meta">Generated: ${new Date().toLocaleString()} • ${
+            shopAdmin && !platformAdmin
+              ? shops.length === 1
+                ? shops[0].name
+                : 'Managed Shops'
+              : 'All Shops Combined'
+          }</div>
         </div>
         <div class="summary-grid">
           <div class="summary-card count">
@@ -581,7 +608,7 @@ export const AdminInventory: React.FC = () => {
           <button
             id="stock-adjust-btn"
             onClick={() => {
-              setSelectedProductId(dbState.products[0]?.id || '');
+              setSelectedProductId(visibleProducts[0]?.id || '');
               setQuantityInput('0');
               setAdjustmentType('OUT');
               setAdjustmentCategory('DAMAGED');
@@ -1117,7 +1144,7 @@ export const AdminInventory: React.FC = () => {
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                 >
                   <option value="">-- Choose Product --</option>
-                  {dbState.products.map(p => (
+                  {visibleProducts.map(p => (
                     <option key={p.id} value={p.id}>
                       {p.name} (Current: {p.currentStock} {p.unit})
                     </option>

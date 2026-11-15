@@ -22,6 +22,13 @@ import { ExpenseService } from '../../services/expenseService';
 import { PaymentMethod, Expense } from '../../types';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import { formatPriceInput, parsePriceInput } from '../../utils/priceInput';
+import {
+  getAdminManagedShops,
+  getShopAdminShopIds,
+  hasAdminAccess,
+  isPlatformAdmin,
+  isShopAdmin,
+} from '../../utils/permissions';
 
 const DEFAULT_EXPENSE_CATEGORIES: { id: string; label: string; isCustom?: boolean }[] = [
   { id: 'RENT', label: 'Store Rent & Lease' },
@@ -46,7 +53,7 @@ interface CustomCategory {
 }
 
 export const AdminExpenses: React.FC = () => {
-  const { currentUser, dbState, addToast } = useApp();
+  const { currentUser, dbState, addToast, selectedShopId } = useApp();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [isFilterSheetOpen, setIsFilterSheetOpen] = useState(false);
@@ -58,6 +65,7 @@ export const AdminExpenses: React.FC = () => {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('ALL');
+  const [shopFilter, setShopFilter] = useState('ALL');
 
   // Period filter — ✅ DEFAULT: TODAY
   const [periodFilter, setPeriodFilter] = useState<PeriodFilter>('today');
@@ -78,6 +86,7 @@ export const AdminExpenses: React.FC = () => {
 
   // Form state
   const [title, setTitle] = useState('');
+  const [shopIdInput, setShopIdInput] = useState('GENERAL');
   const [category, setCategory] = useState<string>('ELECTRICITY');
   const [amount, setAmount] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH');
@@ -92,17 +101,29 @@ export const AdminExpenses: React.FC = () => {
   // Permission check
   if (!currentUser) return null;
   if (
-    currentUser.role !== 'ADMIN' &&
+    !hasAdminAccess(currentUser) &&
     !currentUser.permissions?.canViewExpenses &&
     !currentUser.permissions?.canRecordExpenses
   )
     return null;
 
+  const platformAdmin = isPlatformAdmin(currentUser);
+  const shopAdmin = isShopAdmin(currentUser);
+  const managedShopIds = getShopAdminShopIds(currentUser);
   const canRecordExpense =
-    currentUser.role === 'ADMIN' || currentUser.permissions?.canRecordExpenses;
-  const isAdmin = currentUser.role === 'ADMIN';
+    hasAdminAccess(currentUser) || currentUser.permissions?.canRecordExpenses;
+  const isAdmin = hasAdminAccess(currentUser);
 
   const settings = dbState.settings;
+  const allShops = dbState.shops || [];
+  const shops = platformAdmin
+    ? allShops
+    : shopAdmin
+      ? getAdminManagedShops(currentUser, allShops)
+      : allShops.filter(s => (currentUser.assignedShopIds || []).includes(s.id));
+
+  const canManageExpense = (expense: Expense) =>
+    platformAdmin || (shopAdmin && !!expense.shopId && managedShopIds.includes(expense.shopId));
 
   const saveCustomCategories = (cats: CustomCategory[]) => {
     setCustomCategories(cats);
@@ -150,6 +171,7 @@ export const AdminExpenses: React.FC = () => {
   const expenses = useMemo(() => {
     return ExpenseService.getExpenses(
       {
+        shopId: shopFilter === 'ALL' ? undefined : shopFilter,
         category: categoryFilter === 'ALL' ? undefined : categoryFilter,
         search: searchQuery,
         startDate: dateRange.from,
@@ -157,7 +179,7 @@ export const AdminExpenses: React.FC = () => {
       },
       currentUser
     );
-  }, [categoryFilter, searchQuery, dateRange, currentUser, dbState.expenses]);
+  }, [shopFilter, categoryFilter, searchQuery, dateRange, currentUser, dbState.expenses]);
 
   const totalSpent = expenses.reduce((sum, e) => sum + e.amount, 0);
 
@@ -189,6 +211,15 @@ export const AdminExpenses: React.FC = () => {
 
   const openAddModal = () => {
     setEditingExpense(null);
+    const defaultShop =
+      shopAdmin && !platformAdmin
+        ? selectedShopId && selectedShopId !== 'ALL' && managedShopIds.includes(selectedShopId)
+          ? selectedShopId
+          : shops[0]?.id || ''
+        : selectedShopId && selectedShopId !== 'ALL'
+          ? selectedShopId
+          : 'GENERAL';
+    setShopIdInput(defaultShop);
     setTitle('');
     setCategory('ELECTRICITY');
     setAmount('');
@@ -201,6 +232,7 @@ export const AdminExpenses: React.FC = () => {
 
   const openEditModal = (expense: Expense) => {
     setEditingExpense(expense);
+    setShopIdInput(expense.shopId || 'GENERAL');
     setTitle(expense.title || expense.description);
     setCategory(expense.category);
     setAmount(expense.amount.toString());
@@ -220,16 +252,25 @@ export const AdminExpenses: React.FC = () => {
       return;
     }
 
+    if (shopAdmin && !platformAdmin && (!shopIdInput || shopIdInput === 'GENERAL')) {
+      setFormError('Please select a managed shop for this expense.');
+      return;
+    }
+
     const amt = parsePriceInput(amount);
     if (isNaN(amt) || amt <= 0) {
       setFormError('Please enter a valid expense amount.');
       return;
     }
 
+    const resolvedShopId = shopIdInput === 'GENERAL' ? null : shopIdInput;
+    const isCompanyExpense = shopIdInput === 'GENERAL';
+
     if (editingExpense) {
       const res = ExpenseService.updateExpense(
         editingExpense.id,
         {
+          shopId: resolvedShopId,
           title: title.trim(),
           category,
           amount: amt,
@@ -254,6 +295,8 @@ export const AdminExpenses: React.FC = () => {
     } else {
       const res = ExpenseService.createExpense(
         {
+          shopId: resolvedShopId,
+          isCompanyExpense,
           title: title.trim(),
           category,
           amount: amt,
@@ -400,12 +443,16 @@ export const AdminExpenses: React.FC = () => {
     setPeriodFilter('today');
     setSearchQuery('');
     setCategoryFilter('ALL');
+    setShopFilter('ALL');
     setCustomStartDate('');
     setCustomEndDate('');
   };
 
   const hasActiveFilters =
-    periodFilter !== 'today' || !!searchQuery || categoryFilter !== 'ALL';
+    periodFilter !== 'today' ||
+    !!searchQuery ||
+    categoryFilter !== 'ALL' ||
+    shopFilter !== 'ALL';
 
   return (
     <div
@@ -527,6 +574,19 @@ export const AdminExpenses: React.FC = () => {
 
         {/* Active filter chips */}
         <div className="flex flex-wrap items-center gap-1.5">
+          {shopFilter !== 'ALL' && (
+            <span className="px-2 py-0.5 rounded-full bg-blue-500/15 border border-blue-500/30 text-[10px] text-blue-300 flex items-center gap-1">
+              {shopFilter === 'GENERAL'
+                ? 'General Company'
+                : shops.find(s => s.id === shopFilter)?.name || 'Shop'}
+              <button
+                onClick={() => setShopFilter('ALL')}
+                className="text-blue-300 hover:text-white"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          )}
           {categoryFilter !== 'ALL' && (
             <span className="px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-[10px] text-slate-300 flex items-center gap-1">
               {getCategoryLabel(categoryFilter)}
@@ -587,11 +647,16 @@ export const AdminExpenses: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between text-xs pt-1">
-                    <span className="px-2 py-0.5 rounded-full bg-slate-800 text-[10px] font-medium border border-slate-700/60 text-slate-300 truncate max-w-[55%]">
-                      {getCategoryLabel(expense.category)}
-                    </span>
-                    <div className="text-[10px] text-slate-400 truncate">
+                  <div className="flex items-center justify-between text-xs pt-1 gap-2">
+                    <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                      <span className="px-2 py-0.5 rounded-full bg-slate-800 text-[10px] font-medium border border-slate-700/60 text-slate-300 truncate">
+                        {getCategoryLabel(expense.category)}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full bg-blue-950/60 text-[10px] font-medium border border-blue-800/40 text-blue-300 truncate">
+                        🏪 {expense.shopName || 'General Company'}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 truncate shrink-0">
                       {expense.reference && (
                         <span className="font-mono mr-2">Ref: {expense.reference}</span>
                       )}
@@ -599,7 +664,7 @@ export const AdminExpenses: React.FC = () => {
                     </div>
                   </div>
 
-                  {isAdmin && (
+                  {canManageExpense(expense) && (
                     <div className="flex items-center gap-2 pt-1.5 border-t border-slate-800/60">
                       <button
                         onClick={() => openEditModal(expense)}
@@ -627,6 +692,7 @@ export const AdminExpenses: React.FC = () => {
                 <thead>
                   <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400">
                     <th className="py-3 px-4 font-semibold">Date</th>
+                    <th className="py-3 px-4 font-semibold">Shop</th>
                     <th className="py-3 px-4 font-semibold">Expense Title</th>
                     <th className="py-3 px-4 font-semibold">Category</th>
                     <th className="py-3 px-4 font-semibold">Payment</th>
@@ -643,6 +709,11 @@ export const AdminExpenses: React.FC = () => {
                     <tr key={expense.id} className="hover:bg-slate-850/60 transition">
                       <td className="py-3.5 px-4 text-slate-400 font-mono">
                         {formatDateTime(expense.createdAt)}
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <span className="px-2 py-0.5 rounded bg-blue-950/60 text-blue-300 border border-blue-800/40 text-[10px] font-medium">
+                          🏪 {expense.shopName || 'General Company'}
+                        </span>
                       </td>
                       <td className="py-3.5 px-4 font-bold text-white">
                         {expense.title || expense.description}
@@ -666,20 +737,24 @@ export const AdminExpenses: React.FC = () => {
                       </td>
                       {isAdmin && (
                         <td className="py-3.5 px-4 text-right space-x-1.5 whitespace-nowrap">
-                          <button
-                            onClick={() => openEditModal(expense)}
-                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white transition"
-                            title="Edit expense"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => setDeletingExpense(expense)}
-                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-600 text-slate-300 hover:text-white transition"
-                            title="Delete expense"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          {canManageExpense(expense) && (
+                            <>
+                              <button
+                                onClick={() => openEditModal(expense)}
+                                className="p-1.5 rounded-lg bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white transition"
+                                title="Edit expense"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => setDeletingExpense(expense)}
+                                className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-600 text-slate-300 hover:text-white transition"
+                                title="Delete expense"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          )}
                         </td>
                       )}
                     </tr>
@@ -765,6 +840,30 @@ export const AdminExpenses: React.FC = () => {
               )}
 
               <div>
+                <label className="block text-slate-300 font-medium mb-1.5">Shop / Unit</label>
+                <select
+                  value={shopFilter}
+                  onChange={e => setShopFilter(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="ALL">
+                    {shopAdmin && !platformAdmin
+                      ? shops.length === 1
+                        ? shops[0].name
+                        : 'All Managed Shops'
+                      : 'All Shops & Company'}
+                  </option>
+                  {platformAdmin && <option value="GENERAL">General Company</option>}
+                  {(platformAdmin || shops.length > 1) &&
+                    shops.map(s => (
+                      <option key={s.id} value={s.id}>
+                        🏪 {s.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div>
                 <label className="block text-slate-300 font-medium mb-1.5">Category</label>
                 <select
                   value={categoryFilter}
@@ -837,6 +936,27 @@ export const AdminExpenses: React.FC = () => {
             )}
 
             <form onSubmit={handleSaveExpense} className="space-y-4 text-xs">
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">
+                  Shop / Unit {shopAdmin && !platformAdmin ? '*' : ''}
+                </label>
+                <select
+                  value={shopIdInput}
+                  onChange={e => setShopIdInput(e.target.value)}
+                  required={shopAdmin && !platformAdmin}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  {(!shopAdmin || platformAdmin) && (
+                    <option value="GENERAL">🏢 General Company (All Shops)</option>
+                  )}
+                  {shops.map(s => (
+                    <option key={s.id} value={s.id}>
+                      🏪 {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label className="block text-slate-300 font-medium mb-1">
                   Expense Description *

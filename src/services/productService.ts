@@ -3,6 +3,7 @@ import { Product, ProductImage, ProductStatus, User } from '../types';
 import { generateUUID } from '../utils/crypto';
 import { normalizeProductImages } from '../utils/imageUtils';
 import { CloudflareApi } from './cloudflareApi';
+import { canAccessShopAsAdmin, getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 // Helper to convert base64 to Blob
 function base64ToBlob(dataUrl: string, mimeType: string): Promise<Blob> {
@@ -148,14 +149,24 @@ export class ProductService {
     },
     currentUser: User
   ): Promise<{ success: boolean; product?: Product; error?: string }> {
-    // Sellers can create products for their assigned shops
-    if (currentUser.role === 'SELLER') {
-      const assigned = currentUser.assignedShopIds || [];
-      if (assigned.length > 0 && !assigned.includes(data.shopId)) {
-        return {
-          success: false,
-          error: 'Permission Denied: You are not assigned to this shop.',
-        };
+    // Shop Admins & Sellers can only create products for their allowed shops
+    if (!isPlatformAdmin(currentUser)) {
+      if (isShopAdmin(currentUser)) {
+        const managedIds = getShopAdminShopIds(currentUser);
+        if (!managedIds.includes(data.shopId)) {
+          return {
+            success: false,
+            error: 'Permission Denied: You can only add products to your managed shop.',
+          };
+        }
+      } else {
+        const assigned = currentUser.assignedShopIds || [];
+        if (assigned.length > 0 && !assigned.includes(data.shopId)) {
+          return {
+            success: false,
+            error: 'Permission Denied: You are not assigned to this shop.',
+          };
+        }
       }
     }
 
@@ -285,8 +296,9 @@ export class ProductService {
     updates: Partial<Omit<Product, 'id' | 'createdAt'>>,
     currentUser: User
   ): Promise<{ success: boolean; product?: Product; error?: string }> {
-    // FIX: Allow Admin OR Seller with canEditProducts permission
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canEditProducts) {
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    if (!platformAdmin && !shopAdmin && !currentUser.permissions?.canEditProducts) {
       return {
         success: false,
         error: 'Permission Denied: You do not have permission to edit products.',
@@ -301,6 +313,15 @@ export class ProductService {
 
     const current = products[index];
     const targetShopId = updates.shopId || current.shopId;
+
+    if (!platformAdmin && shopAdmin) {
+      if (!canAccessShopAsAdmin(currentUser, current.shopId) || !canAccessShopAsAdmin(currentUser, targetShopId)) {
+        return {
+          success: false,
+          error: 'Permission Denied: You can only edit products belonging to your managed shop.',
+        };
+      }
+    }
 
     // If SKU changed, check uniqueness within shop
     if (updates.sku && updates.sku !== current.sku) {
@@ -379,8 +400,7 @@ export class ProductService {
     newStatus: ProductStatus,
     currentUser: User
   ): { success: boolean; error?: string } {
-    // FIX: Allow Admin OR Seller with canEditProducts permission
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canEditProducts) {
+    if (!isPlatformAdmin(currentUser) && !isShopAdmin(currentUser) && !currentUser.permissions?.canEditProducts) {
       return {
         success: false,
         error: 'Permission Denied: You do not have permission to change product status.',
@@ -398,8 +418,9 @@ export class ProductService {
     productId: string,
     currentUser: User
   ): { success: boolean; error?: string } {
-    // FIX: Allow Admin OR Seller with canDeleteProducts permission
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canDeleteProducts) {
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    if (!platformAdmin && !shopAdmin && !currentUser.permissions?.canDeleteProducts) {
       return {
         success: false,
         error: 'Permission Denied: You do not have permission to delete products.',
@@ -411,6 +432,13 @@ export class ProductService {
 
     if (!product) {
       return { success: false, error: 'Product not found.' };
+    }
+
+    if (!platformAdmin && shopAdmin && !canAccessShopAsAdmin(currentUser, product.shopId)) {
+      return {
+        success: false,
+        error: 'Permission Denied: You can only delete products from your managed shop.',
+      };
     }
 
     // Remove product

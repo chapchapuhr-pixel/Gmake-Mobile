@@ -7,6 +7,7 @@ import { MobileBottomNav } from './components/common/MobileBottomNav';
 import { ReceiptModal } from './components/common/ReceiptModal';
 import { ToastContainer } from './components/common/ToastContainer';
 import { LoginView } from './components/auth/LoginView';
+import { getEffectiveSellerPermissions, isShopAdmin } from './utils/permissions';
 
 // Common / Shared Independent Modules
 import { DebtManagement } from './components/debt/DebtManagement';
@@ -51,14 +52,18 @@ const MainLayout: React.FC = () => {
     }
 
     if (currentUser.role === 'SELLER') {
-      const permissions = currentUser.permissions || {};
+      const shopAdmin = isShopAdmin(currentUser);
+      const permissions = getEffectiveSellerPermissions(currentUser);
 
       switch (activeTab) {
         case 'dashboard':
-          return <SellerDashboard />;
+          return shopAdmin ? <AdminDashboard /> : <SellerDashboard />;
         case 'new_sale':
           return <NewSalePOS />;
         case 'products':
+          if (permissions.canEditProducts || permissions.canDeleteProducts) {
+            return <AdminProducts />;
+          }
           return <SellerProducts />;
         case 'purchases':
           // Sellers can always view/record purchases

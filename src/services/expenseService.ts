@@ -1,6 +1,7 @@
 import { db } from '../db/storage';
 import { Expense, ExpenseCategory, PaymentMethod, User } from '../types';
 import { generateUUID } from '../utils/crypto';
+import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export class ExpenseService {
   /**
@@ -22,8 +23,12 @@ export class ExpenseService {
     },
     currentUser: User
   ): { success: boolean; expense?: Expense; error?: string } {
-    // Allow Admin OR Seller with canRecordExpenses permission
-    if (currentUser.role !== 'ADMIN' && !currentUser.permissions?.canRecordExpenses) {
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    const managedShopIds = getShopAdminShopIds(currentUser);
+
+    // Allow Platform Admin, Shop Admin, or Seller with canRecordExpenses permission
+    if (!platformAdmin && !shopAdmin && !currentUser.permissions?.canRecordExpenses) {
       return {
         success: false,
         error: 'Permission Denied: You do not have permission to record expenses.',
@@ -41,10 +46,33 @@ export class ExpenseService {
 
     let shopName: string | undefined = undefined;
     let finalShopId: string | null = null;
-    const isCompany = params.isCompanyExpense || !params.shopId || params.shopId === 'GENERAL';
+    const requestedShopId = params.shopId && params.shopId !== 'GENERAL' ? params.shopId : undefined;
 
-    if (!isCompany && params.shopId) {
-      const shop = db.getShops().find(s => s.id === params.shopId);
+    let isCompany = params.isCompanyExpense || !requestedShopId;
+
+    if (!platformAdmin && shopAdmin) {
+      const resolvedShopId = requestedShopId || (managedShopIds.length === 1 ? managedShopIds[0] : undefined);
+      if (params.isCompanyExpense || params.shopId === 'GENERAL' || !resolvedShopId) {
+        return {
+          success: false,
+          error: 'Shop Admin must assign expenses to a specific managed shop (company-wide general expenses are Platform Admin only).',
+        };
+      }
+      if (!managedShopIds.includes(resolvedShopId)) {
+        return {
+          success: false,
+          error: 'Permission Denied: You can only record expenses for your managed shop.',
+        };
+      }
+      isCompany = false;
+      const shop = db.getShops().find(s => s.id === resolvedShopId);
+      if (!shop) {
+        return { success: false, error: 'Selected shop does not exist.' };
+      }
+      shopName = shop.name;
+      finalShopId = shop.id;
+    } else if (!isCompany && requestedShopId) {
+      const shop = db.getShops().find(s => s.id === requestedShopId);
       if (!shop) {
         return { success: false, error: 'Selected shop does not exist.' };
       }
@@ -122,6 +150,7 @@ export class ExpenseService {
   public static updateExpense(
     expenseId: string,
     updates: {
+      shopId?: string | null;
       title?: string;
       category?: ExpenseCategory | string;
       amount?: number;
@@ -132,7 +161,6 @@ export class ExpenseService {
     },
     currentUser: User
   ): { success: boolean; expense?: Expense; error?: string } {
-    // Permission check: Admin OR user who created the expense with canRecordExpenses
     const expenses = db.getExpenses();
     const index = expenses.findIndex(e => e.id === expenseId);
 
@@ -141,20 +169,31 @@ export class ExpenseService {
     }
 
     const current = expenses[index];
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    const managedShopIds = getShopAdminShopIds(currentUser);
 
-    // Admin can edit any, Seller with canRecordExpenses can edit only their own
-    if (currentUser.role !== 'ADMIN') {
-      if (!currentUser.permissions?.canRecordExpenses) {
-        return {
-          success: false,
-          error: 'Permission Denied: You do not have permission to edit expenses.',
-        };
-      }
-      if (current.createdByUserId !== currentUser.id) {
-        return {
-          success: false,
-          error: 'Permission Denied: You can only edit expenses you created.',
-        };
+    if (!platformAdmin) {
+      if (shopAdmin) {
+        if (!current.shopId || !managedShopIds.includes(current.shopId)) {
+          return {
+            success: false,
+            error: 'Permission Denied: You can only edit expenses belonging to your managed shop.',
+          };
+        }
+      } else {
+        if (!currentUser.permissions?.canRecordExpenses) {
+          return {
+            success: false,
+            error: 'Permission Denied: You do not have permission to edit expenses.',
+          };
+        }
+        if (current.createdByUserId !== currentUser.id) {
+          return {
+            success: false,
+            error: 'Permission Denied: You can only edit expenses you created.',
+          };
+        }
       }
     }
 
@@ -162,10 +201,45 @@ export class ExpenseService {
       return { success: false, error: 'Amount must be greater than zero.' };
     }
 
+    let nextShopId = current.shopId;
+    let nextShopName = current.shopName;
+    let nextIsCompany = current.isCompanyExpense;
+
+    if (updates.shopId !== undefined) {
+      if (updates.shopId === 'GENERAL' || updates.shopId === null || updates.shopId === '') {
+        if (!platformAdmin) {
+          return {
+            success: false,
+            error: 'Permission Denied: Only Platform Admin can move an expense to General Company.',
+          };
+        }
+        nextShopId = null;
+        nextShopName = 'General Company';
+        nextIsCompany = true;
+      } else {
+        if (!platformAdmin && shopAdmin && !managedShopIds.includes(updates.shopId)) {
+          return {
+            success: false,
+            error: 'Permission Denied: Target shop is outside your managed shops.',
+          };
+        }
+        const shop = db.getShops().find(s => s.id === updates.shopId);
+        if (!shop) {
+          return { success: false, error: 'Selected shop does not exist.' };
+        }
+        nextShopId = shop.id;
+        nextShopName = shop.name;
+        nextIsCompany = false;
+      }
+    }
+
     const finalTitle = updates.title?.trim() || current.title || current.description;
 
     const updatedExpense: Expense = {
       ...current,
+      shopId: nextShopId,
+      shopName: nextShopName,
+      isCompanyExpense: nextIsCompany,
       title: finalTitle,
       description: finalTitle,
       category: updates.category || current.category,
@@ -211,8 +285,11 @@ export class ExpenseService {
     expenseId: string,
     currentUser: User
   ): { success: boolean; error?: string } {
-    // Admin only for deletion
-    if (currentUser.role !== 'ADMIN') {
+    const platformAdmin = isPlatformAdmin(currentUser);
+    const shopAdmin = isShopAdmin(currentUser);
+    const managedShopIds = getShopAdminShopIds(currentUser);
+
+    if (!platformAdmin && !shopAdmin) {
       return { success: false, error: 'Permission Denied: Only Admin can delete expenses.' };
     }
 
@@ -221,6 +298,13 @@ export class ExpenseService {
 
     if (!expense) {
       return { success: false, error: 'Expense not found.' };
+    }
+
+    if (!platformAdmin && (!expense.shopId || !managedShopIds.includes(expense.shopId))) {
+      return {
+        success: false,
+        error: 'Permission Denied: You can only delete expenses belonging to your managed shop.',
+      };
     }
 
     const updatedExpenses = expenses.filter(e => e.id !== expenseId);
@@ -251,7 +335,8 @@ export class ExpenseService {
   }
 
   /**
-   * Get expenses - Admin sees all, Seller with canViewExpenses/canRecordExpenses sees all.
+   * Get expenses - Platform Admin sees all, Shop Admin sees managed shops' expenses,
+   * Seller with canViewExpenses/canRecordExpenses sees expenses.
    */
   public static getExpenses(
     filter?: {
@@ -263,10 +348,10 @@ export class ExpenseService {
     },
     currentUser?: User
   ): Expense[] {
-    // Allow Admin OR Seller with canViewExpenses/canRecordExpenses to view expenses
     if (currentUser) {
       if (
-        currentUser.role !== 'ADMIN' &&
+        !isPlatformAdmin(currentUser) &&
+        !isShopAdmin(currentUser) &&
         !currentUser.permissions?.canViewExpenses &&
         !currentUser.permissions?.canRecordExpenses
       ) {
@@ -275,6 +360,11 @@ export class ExpenseService {
     }
 
     let list = db.getExpenses();
+
+    if (currentUser && !isPlatformAdmin(currentUser) && isShopAdmin(currentUser)) {
+      const managedShopIds = getShopAdminShopIds(currentUser);
+      list = list.filter(e => !!e.shopId && managedShopIds.includes(e.shopId));
+    }
 
     if (filter?.shopId && filter.shopId !== 'ALL') {
       if (filter.shopId === 'GENERAL') {

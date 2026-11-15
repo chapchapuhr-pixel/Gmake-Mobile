@@ -33,6 +33,17 @@ export async function onRequestPost(context: any) {
       });
     }
 
+    let parsedPermissions = {};
+    try {
+      parsedPermissions = user.permissions
+        ? typeof user.permissions === 'string'
+          ? JSON.parse(user.permissions)
+          : user.permissions
+        : {};
+    } catch {
+      parsedPermissions = {};
+    }
+
     return new Response(JSON.stringify({
       success: true,
       user: {
@@ -43,6 +54,8 @@ export async function onRequestPost(context: any) {
         color: user.color,
         status: user.status,
         assignedShopIds: JSON.parse(user.assigned_shop_ids || '[]'),
+        avatarUrl: user.avatar_url || null,
+        permissions: parsedPermissions,
       },
       token: `token_${user.id}_${Date.now()}`,
     }), {

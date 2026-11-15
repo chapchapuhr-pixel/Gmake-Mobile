@@ -89,7 +89,7 @@ export const NotificationCenter: React.FC = () => {
     if (n.relatedEntityType === 'DEBT' || n.type.startsWith('DEBT_')) {
       setActiveTab('debts');
     } else if (n.relatedEntityType === 'PRODUCT' || n.type.startsWith('STOCK_') || n.type.startsWith('PRICE_')) {
-      if (currentUser?.role === 'ADMIN') {
+      if (currentUser?.role === 'ADMIN' || (currentUser?.permissions?.shopAdminShopIds && currentUser.permissions.shopAdminShopIds.length > 0)) {
         setActiveTab('inventory');
       } else {
         setActiveTab('products');

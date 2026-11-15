@@ -24,6 +24,12 @@ import { formatCurrency } from '../../utils/formatters';
 import { ProductThumbnail } from '../common/ProductThumbnail';
 import { ProductImageViewerModal } from '../common/ProductImageViewerModal';
 import { ProductImageUpload } from '../common/ProductImageUpload';
+import {
+  getAdminManagedShops,
+  hasAdminAccess,
+  isPlatformAdmin,
+  isShopAdmin,
+} from '../../utils/permissions';
 
 const PAGE_SIZE = 5;
 
@@ -77,20 +83,33 @@ export const AdminProducts: React.FC = () => {
 
   if (!currentUser) return null;
   if (
-    currentUser.role !== 'ADMIN' &&
+    !hasAdminAccess(currentUser) &&
     !currentUser.permissions?.canEditProducts &&
     !currentUser.permissions?.canDeleteProducts
   )
     return null;
 
+  const platformAdmin = isPlatformAdmin(currentUser);
+  const shopAdmin = isShopAdmin(currentUser);
   const settings = dbState.settings;
-  const categories = dbState.categories || [];
-  const shops = dbState.shops || [];
+  const allShops = dbState.shops || [];
+  const shops = platformAdmin
+    ? allShops
+    : shopAdmin
+      ? getAdminManagedShops(currentUser, allShops)
+      : allShops.filter(s => (currentUser.assignedShopIds || []).includes(s.id));
+  const visibleShopIdSet = new Set(shops.map(s => s.id));
+
+  const categories = (dbState.categories || []).filter(
+    c => platformAdmin || visibleShopIdSet.has(c.shopId)
+  );
 
   const availableFilterCategories =
     shopFilter === 'ALL' ? categories : categories.filter(c => c.shopId === shopFilter);
 
-  const allProducts = dbState.products || [];
+  const allProducts = (dbState.products || []).filter(
+    p => platformAdmin || (!!p.shopId && visibleShopIdSet.has(p.shopId))
+  );
 
   const products = allProducts.filter(p => {
     if (shopFilter !== 'ALL' && p.shopId !== shopFilter) return false;
@@ -160,7 +179,9 @@ export const AdminProducts: React.FC = () => {
   const openAddModal = () => {
     setEditingProduct(null);
     const initialShopId =
-      selectedShopId && selectedShopId !== 'ALL' ? selectedShopId : shops[0]?.id || '';
+      selectedShopId && selectedShopId !== 'ALL' && visibleShopIdSet.has(selectedShopId)
+        ? selectedShopId
+        : shops[0]?.id || '';
     setProductShopId(initialShopId);
     setName('');
     setSku('');
@@ -184,7 +205,7 @@ export const AdminProducts: React.FC = () => {
 
   const openEditModal = (p: Product) => {
     setEditingProduct(p);
-    const pShopId = p.shopId || shops[0]?.id || '';
+    const pShopId = p.shopId && visibleShopIdSet.has(p.shopId) ? p.shopId : shops[0]?.id || '';
     setProductShopId(pShopId);
     setName(p.name);
     setSku(p.sku);
@@ -331,8 +352,11 @@ export const AdminProducts: React.FC = () => {
   const openAddCategoryModal = (targetShopId?: string) => {
     setEditingCategory(null);
     const defaultShop =
-      targetShopId ||
-      (selectedShopId && selectedShopId !== 'ALL' ? selectedShopId : shops[0]?.id || '');
+      targetShopId && visibleShopIdSet.has(targetShopId)
+        ? targetShopId
+        : selectedShopId && selectedShopId !== 'ALL' && visibleShopIdSet.has(selectedShopId)
+          ? selectedShopId
+          : shops[0]?.id || '';
     setCatShopIdInput(defaultShop);
     setCatNameInput('');
     setCatColorInput('#3b82f6');
@@ -342,7 +366,9 @@ export const AdminProducts: React.FC = () => {
 
   const openEditCategoryModal = (cat: Category) => {
     setEditingCategory(cat);
-    setCatShopIdInput(cat.shopId || shops[0]?.id || '');
+    setCatShopIdInput(
+      cat.shopId && visibleShopIdSet.has(cat.shopId) ? cat.shopId : shops[0]?.id || ''
+    );
     setCatNameInput(cat.name);
     setCatColorInput(cat.color || '#3b82f6');
     setCatModalError('');
@@ -410,8 +436,8 @@ export const AdminProducts: React.FC = () => {
     }
   };
 
-  const canEdit = currentUser.role === 'ADMIN' || currentUser.permissions?.canEditProducts;
-  const canDelete = currentUser.role === 'ADMIN' || currentUser.permissions?.canDeleteProducts;
+  const canEdit = hasAdminAccess(currentUser) || currentUser.permissions?.canEditProducts;
+  const canDelete = hasAdminAccess(currentUser) || currentUser.permissions?.canDeleteProducts;
 
   // ==============================
   // MOBILE PRODUCT CARD
@@ -628,12 +654,19 @@ export const AdminProducts: React.FC = () => {
                 onChange={e => setShopFilter(e.target.value)}
                 className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
               >
-                <option value="ALL">All Shops</option>
-                {shops.map(s => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
+                <option value="ALL">
+                  {shopAdmin && !platformAdmin
+                    ? shops.length === 1
+                      ? shops[0].name
+                      : 'All Managed Shops'
+                    : 'All Shops'}
+                </option>
+                {(platformAdmin || shops.length > 1) &&
+                  shops.map(s => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
               </select>
 
               <select

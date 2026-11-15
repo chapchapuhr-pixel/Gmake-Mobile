@@ -20,6 +20,13 @@ import { SyncService } from '../../services/syncService';
 import { db } from '../../db/storage';
 import { Sale, SaleEditRequest } from '../../types';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
+import {
+  getAdminManagedShops,
+  getShopAdminShopIds,
+  hasAdminAccess,
+  isPlatformAdmin,
+  isShopAdmin,
+} from '../../utils/permissions';
 
 type DatePreset = 'TODAY' | 'WEEK' | 'MONTH' | 'CUSTOM';
 
@@ -96,15 +103,18 @@ export const AdminSales: React.FC = () => {
   // Permission check
   if (!currentUser) return null;
   if (
-    currentUser.role !== 'ADMIN' &&
+    !hasAdminAccess(currentUser) &&
     !currentUser.permissions?.canEditSales &&
     !currentUser.permissions?.canDeleteSales
   )
     return null;
 
-  const canEditSale = currentUser.role === 'ADMIN' || currentUser.permissions?.canEditSales;
-  const canVoidSale = currentUser.role === 'ADMIN' || currentUser.permissions?.canDeleteSales;
-  const isAdmin = currentUser.role === 'ADMIN';
+  const platformAdmin = isPlatformAdmin(currentUser);
+  const shopAdmin = isShopAdmin(currentUser);
+  const managedShopIds = getShopAdminShopIds(currentUser);
+  const canEditSale = hasAdminAccess(currentUser) || currentUser.permissions?.canEditSales;
+  const canVoidSale = hasAdminAccess(currentUser) || currentUser.permissions?.canDeleteSales;
+  const isAdmin = hasAdminAccess(currentUser);
 
   // Force pull on mount
   useEffect(() => {
@@ -167,8 +177,19 @@ export const AdminSales: React.FC = () => {
   };
 
   const settings = dbState.settings;
-  const sellers = dbState.users.filter(u => u.role === 'SELLER');
-  const shops = dbState.shops || [];
+  const allShops = dbState.shops || [];
+  const shops = platformAdmin
+    ? allShops
+    : shopAdmin
+      ? getAdminManagedShops(currentUser, allShops)
+      : allShops.filter(s => (currentUser.assignedShopIds || []).includes(s.id));
+  const sellers = dbState.users.filter(
+    u =>
+      u.role === 'SELLER' &&
+      (platformAdmin ||
+        !shopAdmin ||
+        (u.assignedShopIds || []).some(sid => managedShopIds.includes(sid)))
+  );
   const products = dbState.products || [];
   const editRequests = SalesService.getSaleEditRequests(currentUser);
   const pendingRequests = editRequests.filter(r => r.status === 'PENDING');
@@ -197,7 +218,11 @@ export const AdminSales: React.FC = () => {
 
   const selectedShopName =
     shopFilter === 'ALL'
-      ? 'All Shops'
+      ? shopAdmin && !platformAdmin
+        ? shops.length === 1
+          ? shops[0].name
+          : 'All Managed Shops'
+        : 'All Shops'
       : shops.find(s => s.id === shopFilter)?.name || 'Unknown Shop';
 
   const handleExecuteVoid = () => {
@@ -613,24 +638,31 @@ export const AdminSales: React.FC = () => {
                     {request.newValues.items.length}
                   </div>
 
-                  {isAdmin && (
-                    <div className="flex gap-2 pt-2">
-                      <button
-                        onClick={() => handleReviewRequest(request, 'APPROVE')}
-                        className="flex-1 px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white text-xs font-semibold transition flex items-center justify-center gap-1"
-                      >
-                        <Check className="w-3.5 h-3.5" />
-                        Approve
-                      </button>
-                      <button
-                        onClick={() => handleReviewRequest(request, 'REJECT')}
-                        className="flex-1 px-3 py-2 rounded bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white text-xs font-semibold transition flex items-center justify-center gap-1"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                        Reject
-                      </button>
-                    </div>
-                  )}
+                  {isAdmin && (() => {
+                    const requestSale = dbState.sales.find(s => s.id === request.saleId);
+                    const canApproveThisRequest =
+                      platformAdmin ||
+                      (!!requestSale?.shopId && managedShopIds.includes(requestSale.shopId));
+                    if (!canApproveThisRequest) return null;
+                    return (
+                      <div className="flex gap-2 pt-2">
+                        <button
+                          onClick={() => handleReviewRequest(request, 'APPROVE')}
+                          className="flex-1 px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white text-xs font-semibold transition flex items-center justify-center gap-1"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          Approve
+                        </button>
+                        <button
+                          onClick={() => handleReviewRequest(request, 'REJECT')}
+                          className="flex-1 px-3 py-2 rounded bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white text-xs font-semibold transition flex items-center justify-center gap-1"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          Reject
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             ))}
@@ -713,12 +745,15 @@ export const AdminSales: React.FC = () => {
             onChange={e => setShopFilter(e.target.value)}
             className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
           >
-            <option value="ALL">🏪 All Shops</option>
-            {shops.map(s => (
-              <option key={s.id} value={s.id}>
-                🏪 {s.name}
-              </option>
-            ))}
+            <option value="ALL">
+              🏪 {shopAdmin && !platformAdmin ? (shops.length === 1 ? shops[0].name : 'All Managed Shops') : 'All Shops'}
+            </option>
+            {(platformAdmin || shops.length > 1) &&
+              shops.map(s => (
+                <option key={s.id} value={s.id}>
+                  🏪 {s.name}
+                </option>
+              ))}
           </select>
 
           <select

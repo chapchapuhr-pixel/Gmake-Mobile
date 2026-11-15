@@ -56,7 +56,7 @@ interface CartItem {
 }
 
 export const NewSalePOS: React.FC = () => {
-  const { currentUser, dbState, addToast, showReceipt, sellerColor, selectedShopId, currentShop } = useApp();
+  const { currentUser, dbState, addToast, showReceipt, sellerColor, selectedShopId, currentShop, availableShops } = useApp();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [barcodeInput, setBarcodeInput] = useState('');
@@ -86,7 +86,12 @@ export const NewSalePOS: React.FC = () => {
   const barcodeInputRef = useRef<HTMLInputElement>(null);
   const settings = dbState.settings;
 
-  const targetShopId = currentShop?.id || (selectedShopId !== 'ALL' ? selectedShopId : '') || (dbState.shops[0]?.id || '');
+  const targetShopId =
+    currentShop?.id ||
+    (selectedShopId !== 'ALL' ? selectedShopId : '') ||
+    availableShops[0]?.id ||
+    dbState.shops[0]?.id ||
+    '';
 
   const products = useMemo(() => {
     return dbState.products.filter(

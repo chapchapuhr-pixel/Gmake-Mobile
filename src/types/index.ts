@@ -19,6 +19,7 @@ export interface SellerPermissions {
   canManageSellers?: boolean;     // Manage other sellers
   canRecordPurchases?: boolean;   // Record purchases
   canViewPurchases?: boolean;     // View purchases
+  shopAdminShopIds?: string[];    // Shops where this seller is designated Shop Admin (full admin powers scoped strictly to these shops)
 }
 
 export interface User {

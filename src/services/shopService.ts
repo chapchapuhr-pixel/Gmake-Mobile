@@ -1,5 +1,7 @@
 import { db } from '../db/storage';
 import { Shop, User, ShopStatus } from '../types';
+import { generateUUID } from '../utils/crypto';
+import { ALL_SHOP_ADMIN_PERMISSIONS, canAccessShopAsAdmin, getShopAdminShopIds, isPlatformAdmin } from '../utils/permissions';
 
 export interface ShopFilterOptions {
   status?: 'ALL' | ShopStatus;
@@ -34,6 +36,152 @@ export class ShopService {
 
   public static getShopById(id: string): Shop | undefined {
     return db.getShops().find(s => s.id === id);
+  }
+
+  /**
+   * Returns the designated active Shop Admin (from active shop sellers) for a given shop, if any.
+   */
+  public static getShopAdmin(shopId: string): User | undefined {
+    return db.getUsers().find(
+      u =>
+        u.role === 'SELLER' &&
+        u.status === 'ACTIVE' &&
+        (u.assignedShopIds || []).includes(shopId) &&
+        getShopAdminShopIds(u).includes(shopId)
+    );
+  }
+
+  /**
+   * Platform Admin assigns or removes a designated Shop Admin for a specific shop.
+   * The Shop Admin must be an active seller currently assigned to that shop,
+   * and receives full admin permissions scoped strictly to their managed shop(s).
+   */
+  public static setShopAdmin(
+    shopId: string,
+    sellerId: string | null,
+    currentUser: User
+  ): { success: boolean; error?: string } {
+    if (!isPlatformAdmin(currentUser)) {
+      return { success: false, error: 'Permission Denied: Only Platform Admin can assign a Shop Admin.' };
+    }
+
+    const shops = db.getShops();
+    const shop = shops.find(s => s.id === shopId);
+    if (!shop) {
+      return { success: false, error: 'Shop not found.' };
+    }
+
+    const users = db.getUsers();
+    let targetSeller: User | undefined;
+
+    if (sellerId) {
+      targetSeller = users.find(u => u.id === sellerId && u.role === 'SELLER');
+      if (!targetSeller) {
+        return { success: false, error: 'Selected seller was not found.' };
+      }
+      if (targetSeller.status !== 'ACTIVE') {
+        return { success: false, error: 'Only an active seller can be appointed as Shop Admin.' };
+      }
+      if (!(targetSeller.assignedShopIds || []).includes(shopId)) {
+        return {
+          success: false,
+          error: `Seller must already be assigned to ${shop.name} before becoming its Shop Admin.`,
+        };
+      }
+    }
+
+    const now = new Date().toISOString();
+    const changedUsers: User[] = [];
+
+    const updatedUsers = users.map(u => {
+      if (u.role !== 'SELLER') return u;
+
+      const currentManagedIds = getShopAdminShopIds(u);
+      const isCurrentlyAdminOfShop = currentManagedIds.includes(shopId);
+
+      // Selected target seller: grant/retain Shop Admin for this shop
+      if (targetSeller && u.id === targetSeller.id) {
+        const nextManagedIds = Array.from(new Set([...currentManagedIds, shopId]));
+        const nextPermissions = {
+          ...(u.permissions || {}),
+          ...ALL_SHOP_ADMIN_PERMISSIONS,
+          shopAdminShopIds: nextManagedIds,
+        };
+        const updatedUser: User = {
+          ...u,
+          permissions: nextPermissions,
+          updatedAt: now,
+        };
+        changedUsers.push(updatedUser);
+        return updatedUser;
+      }
+
+      // Any previous Shop Admin of this shop: demote from this shop
+      if (isCurrentlyAdminOfShop) {
+        const remainingIds = currentManagedIds.filter(id => id !== shopId);
+        const nextPermissions =
+          remainingIds.length > 0
+            ? {
+                ...(u.permissions || {}),
+                ...ALL_SHOP_ADMIN_PERMISSIONS,
+                shopAdminShopIds: remainingIds,
+              }
+            : {};
+
+        const updatedUser: User = {
+          ...u,
+          permissions: nextPermissions,
+          updatedAt: now,
+        };
+        changedUsers.push(updatedUser);
+        return updatedUser;
+      }
+
+      return u;
+    });
+
+    db.saveUsers(updatedUsers);
+
+    // Enqueue cloud sync for every affected seller so D1 permissions stay in sync
+    for (const u of changedUsers) {
+      db.enqueueSync({
+        id: generateUUID(),
+        operation: 'UPDATE_SELLER',
+        entityType: 'SELLER',
+        entityId: u.id,
+        payload: {
+          id: u.id,
+          username: u.username,
+          name: u.name,
+          role: u.role,
+          passwordHash: u.passwordHash,
+          color: u.color,
+          status: u.status,
+          assignedShopIds: u.assignedShopIds,
+          avatarUrl: u.avatarUrl || null,
+          permissions: u.permissions || {},
+          createdAt: u.createdAt,
+          updatedAt: u.updatedAt,
+        },
+        status: 'PENDING',
+        createdAt: now,
+      });
+    }
+
+    db.addAuditLog({
+      id: generateUUID(),
+      userId: currentUser.id,
+      userName: currentUser.name,
+      action: targetSeller ? 'SET_SHOP_ADMIN' : 'REMOVE_SHOP_ADMIN',
+      details: targetSeller
+        ? `Appointed ${targetSeller.name} (@${targetSeller.username}) as Shop Admin for "${shop.name}"`
+        : `Removed Shop Admin assignment from "${shop.name}"`,
+      entityType: 'SHOP',
+      entityId: shop.id,
+      timestamp: now,
+    });
+
+    return { success: true };
   }
 
   public static createShop(
@@ -128,6 +276,10 @@ export class ShopService {
     updatedBy: User
   ): { success: boolean; shop?: Shop; error?: string } {
     try {
+      if (!canAccessShopAsAdmin(updatedBy, id)) {
+        return { success: false, error: 'Permission Denied: You cannot edit this shop.' };
+      }
+
       const shops = db.getShops();
       const index = shops.findIndex(s => s.id === id);
       if (index === -1) {
@@ -194,6 +346,10 @@ export class ShopService {
     updatedBy: User
   ): { success: boolean; shop?: Shop; error?: string } {
     try {
+      if (!canAccessShopAsAdmin(updatedBy, id)) {
+        return { success: false, error: 'Permission Denied: You cannot change this shop status.' };
+      }
+
       const shops = db.getShops();
       const index = shops.findIndex(s => s.id === id);
       if (index === -1) {
@@ -263,12 +419,50 @@ export class ShopService {
     const updatedShops = shops.filter(s => s.id !== shopId);
     db.saveShops(updatedShops);
 
-    // Remove shopId from all users' assignedShopIds
+    // Remove shopId from all users' assignedShopIds and shopAdminShopIds
+    const now = new Date().toISOString();
     const users = db.getUsers();
-    const updatedUsers = users.map(u => ({
-      ...u,
-      assignedShopIds: (u.assignedShopIds || []).filter(id => id !== shopId),
-    }));
+    const updatedUsers = users.map(u => {
+      const nextAssigned = (u.assignedShopIds || []).filter(id => id !== shopId);
+      const currentAdminShops = getShopAdminShopIds(u);
+      if (!currentAdminShops.includes(shopId)) {
+        return { ...u, assignedShopIds: nextAssigned };
+      }
+      const remainingAdminShops = currentAdminShops.filter(id => id !== shopId);
+      const nextPermissions =
+        remainingAdminShops.length > 0
+          ? { ...(u.permissions || {}), ...ALL_SHOP_ADMIN_PERMISSIONS, shopAdminShopIds: remainingAdminShops }
+          : {};
+      const updatedUser: User = {
+        ...u,
+        assignedShopIds: nextAssigned,
+        permissions: nextPermissions,
+        updatedAt: now,
+      };
+      db.enqueueSync({
+        id: generateUUID(),
+        operation: 'UPDATE_SELLER',
+        entityType: 'SELLER',
+        entityId: u.id,
+        payload: {
+          id: updatedUser.id,
+          username: updatedUser.username,
+          name: updatedUser.name,
+          role: updatedUser.role,
+          passwordHash: updatedUser.passwordHash,
+          color: updatedUser.color,
+          status: updatedUser.status,
+          assignedShopIds: updatedUser.assignedShopIds,
+          avatarUrl: updatedUser.avatarUrl || null,
+          permissions: updatedUser.permissions || {},
+          createdAt: updatedUser.createdAt,
+          updatedAt: updatedUser.updatedAt,
+        },
+        status: 'PENDING',
+        createdAt: now,
+      });
+      return updatedUser;
+    });
     db.saveUsers(updatedUsers);
 
     // Remove products in this shop

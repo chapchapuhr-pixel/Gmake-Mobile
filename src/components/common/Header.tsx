@@ -21,6 +21,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { formatDate, formatDateTime } from '../../utils/formatters';
 import { NotificationService } from '../../services/notificationService';
+import { getAdminManagedShops, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
 
 interface HeaderProps {
   onOpenDrawer?: () => void;
@@ -44,7 +45,9 @@ export const Header: React.FC<HeaderProps> = ({ onOpenDrawer }) => {
   const [isNotifDropdownOpen, setIsNotifDropdownOpen] = useState(false);
   const notifDropdownRef = useRef<HTMLDivElement>(null);
 
-  const isAdmin = currentUser?.role === 'ADMIN';
+  const isAdmin = isPlatformAdmin(currentUser);
+  const isShopAdm = isShopAdmin(currentUser);
+  const managedShops = getAdminManagedShops(currentUser, dbState.shops || []);
 
   // Sync automatic notifications
   useEffect(() => {
@@ -111,17 +114,19 @@ export const Header: React.FC<HeaderProps> = ({ onOpenDrawer }) => {
           )}
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
-              <h1 className="font-semibold text-xs sm:text-sm text-white tracking-tight truncate">
+              <h1 className="font-bold text-xs sm:text-sm text-white tracking-tight truncate">
                 {currentUser?.name || 'Gmeck Company Limited'}
               </h1>
               <span
                 className={`text-[9px] sm:text-[10px] px-1.5 sm:px-2 py-0.2 sm:py-0.5 rounded-full font-medium uppercase tracking-wider shrink-0 ${
-                  currentUser?.role === 'ADMIN'
+                  isAdmin
                     ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                    : isShopAdm
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                     : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
                 }`}
               >
-                {currentUser?.role === 'ADMIN' ? 'Admin' : 'Seller'}
+                {isAdmin ? 'Admin' : isShopAdm ? 'Shop Admin' : 'Seller'}
               </span>
             </div>
             <p className="text-[10px] sm:text-xs text-slate-400 truncate hidden xs:block">
@@ -135,7 +140,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenDrawer }) => {
           <Store className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-400 shrink-0" />
           <span className="text-[11px] sm:text-xs text-slate-400 font-medium hidden md:inline">Shop:</span>
 
-          {isAdmin ? (
+          {isAdmin || (isShopAdm && managedShops.length > 1) ? (
             <div className="relative flex items-center">
               <select
                 id="header-admin-shop-select"
@@ -143,8 +148,8 @@ export const Header: React.FC<HeaderProps> = ({ onOpenDrawer }) => {
                 onChange={e => setSelectedShopId(e.target.value)}
                 className="bg-slate-900 text-[11px] sm:text-xs text-slate-200 font-semibold py-1 pl-2 pr-6 rounded border border-slate-700 hover:border-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer appearance-none max-w-[140px] sm:max-w-[200px] truncate"
               >
-                <option value="ALL">🏢 All Shops</option>
-                {availableShops.map(sh => (
+                <option value="ALL">{isAdmin ? '🏢 All Shops' : '🏢 All Managed'}</option>
+                {(isAdmin ? availableShops : managedShops).map(sh => (
                   <option key={sh.id} value={sh.id}>
                     {sh.status === 'INACTIVE' ? `🚫 ${sh.name}` : `🏪 ${sh.name}`}
                   </option>

@@ -6,6 +6,7 @@ import { CloudflareApi } from '../services/cloudflareApi';
 import { User, Sale, ToastMessage, Shop } from '../types';
 import { getColorOption } from '../utils/colors';
 import { generateUUID } from '../utils/crypto';
+import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 interface AppContextType {
   currentUser: User | null;
@@ -76,11 +77,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const allShops = dbState.shops || [];
     if (!currentUser) return allShops;
 
-    if (currentUser.role === 'ADMIN') {
+    if (isPlatformAdmin(currentUser)) {
       return allShops;
     }
 
     const assigned = currentUser.assignedShopIds || [];
+    if (isShopAdmin(currentUser)) {
+      const managedIds = getShopAdminShopIds(currentUser);
+      return allShops.filter(s => managedIds.includes(s.id) || (s.status === 'ACTIVE' && assigned.includes(s.id)));
+    }
+
     return allShops.filter(s => s.status === 'ACTIVE' && assigned.includes(s.id));
   }, [dbState.shops, currentUser]);
 
@@ -282,18 +288,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [currentUser]);
 
-  // Ensure seller has a valid shop selected
+  // Ensure seller (and single-shop Shop Admin) has a valid shop selected
   useEffect(() => {
     if (!currentUser) return;
 
     if (currentUser.role === 'SELLER') {
+      const managedIds = getShopAdminShopIds(currentUser);
       const sellerShops = (dbState.shops || []).filter(
-        s => s.status === 'ACTIVE' && (currentUser.assignedShopIds || []).includes(s.id)
+        s =>
+          managedIds.includes(s.id) ||
+          (s.status === 'ACTIVE' && (currentUser.assignedShopIds || []).includes(s.id))
       );
 
       if (sellerShops.length > 0) {
-        const isCurrentValid = sellerShops.some(s => s.id === selectedShopId);
-        if (!isCurrentValid || selectedShopId === 'ALL') {
+        const allowAllOverview = managedIds.length > 1;
+        const isCurrentValid =
+          (allowAllOverview && selectedShopId === 'ALL') ||
+          sellerShops.some(s => s.id === selectedShopId);
+        if (!isCurrentValid || (!allowAllOverview && selectedShopId === 'ALL')) {
           setSelectedShopId(sellerShops[0].id);
         }
       }
@@ -319,8 +331,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     AuthService.setActiveUser(freshUser);
     setCurrentUser(freshUser);
 
-    if (freshUser.role === 'ADMIN') {
+    if (isPlatformAdmin(freshUser)) {
       setActiveTab('dashboard');
+    } else if (isShopAdmin(freshUser)) {
+      setActiveTab('dashboard');
+      const managedIds = getShopAdminShopIds(freshUser);
+      const managedShops = (dbState.shops || []).filter(
+        s => managedIds.includes(s.id) || (s.status === 'ACTIVE' && (freshUser.assignedShopIds || []).includes(s.id))
+      );
+      if (managedShops.length > 0) {
+        setSelectedShopId(managedShops[0].id);
+      }
     } else {
       setActiveTab('new_sale');
       const sellerShops = (dbState.shops || []).filter(

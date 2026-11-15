@@ -1,13 +1,49 @@
 @import "tailwindcss";
 
+@theme {
+  --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  --font-weight-extrabold: 700;
+  --font-weight-black: 700;
+}
+
 @layer base {
+  html,
   body {
-    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    font-weight: 400;
     -webkit-tap-highlight-color: transparent;
     touch-action: manipulation;
   }
-  
-  code, pre, .font-mono {
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6,
+  label {
+    font-weight: 600;
+  }
+
+  nav,
+  nav button,
+  nav a {
+    font-weight: 500;
+  }
+
+  strong,
+  b {
+    font-weight: 700;
+  }
+
+  code,
+  pre,
+  .font-mono {
     font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   }
 }

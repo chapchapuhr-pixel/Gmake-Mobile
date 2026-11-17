@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   Warehouse,
   ArrowRightLeft,
@@ -10,15 +10,22 @@ import {
   Package,
   Search,
   Edit3,
-  Power,
+  Trash2,
+  AlertTriangle,
   X,
   Layers,
   Tag,
   History,
   Eye,
+  Upload,
+  Download,
+  FileSpreadsheet,
+  RefreshCw,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { StoreService } from '../../services/storeService';
+import { ExcelImportService, ExcelParseResult } from '../../services/excelImportService';
+import { ExcelExportService } from '../../services/excelExportService';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import {
   getAdminManagedShops,
@@ -59,6 +66,18 @@ export const AdminStores: React.FC = () => {
   const [destShopId, setDestShopId] = useState('');
   const [transferNotes, setTransferNotes] = useState('');
   const [transferError, setTransferError] = useState('');
+
+  // Store Excel Import Modal state
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [importTargetStoreId, setImportTargetStoreId] = useState('');
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importParseResult, setImportParseResult] = useState<ExcelParseResult | null>(null);
+  const [isParsingImport, setIsParsingImport] = useState(false);
+  const [isCommittingImport, setIsCommittingImport] = useState(false);
+  const importFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Store Delete Confirmation state
+  const [deletingStore, setDeletingStore] = useState<Store | null>(null);
 
   if (!currentUser || !hasAdminAccess(currentUser)) return null;
 
@@ -379,20 +398,29 @@ export const AdminStores: React.FC = () => {
     }
   };
 
-  const handleToggleStoreStatus = (store: Store) => {
-    const nextStatus = store.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
-    const res = StoreService.updateStore(store.id, { status: nextStatus }, currentUser);
+  const handleConfirmDeleteStore = (store: Store) => {
+    const res = StoreService.deleteStore(store.id, currentUser);
     if (res.success) {
+      if (selectedInventoryStoreId === store.id) {
+        setSelectedInventoryStoreId('ALL_COMBINED');
+      }
+      if (sourceStoreId === store.id) {
+        setSourceStoreId('');
+      }
+      if (importTargetStoreId === store.id) {
+        setImportTargetStoreId('');
+      }
       addToast({
-        type: 'info',
-        title: `Store ${nextStatus === 'ACTIVE' ? 'Activated' : 'Deactivated'}`,
-        description: `"${store.name}" is now ${nextStatus.toLowerCase()}.`,
+        type: 'success',
+        title: 'Store Deleted',
+        description: `"${store.name}" has been deleted and queued for sync.`,
       });
+      setDeletingStore(null);
     } else {
       addToast({
         type: 'error',
-        title: 'Update Failed',
-        description: res.error || 'Could not update store status.',
+        title: 'Delete Failed',
+        description: res.error || 'Could not delete store.',
       });
     }
   };
@@ -476,6 +504,145 @@ export const AdminStores: React.FC = () => {
     Number.isFinite(parsedQty) &&
     parsedQty > availableQtyForSelected;
 
+  // Store Excel Import / Export handlers
+  const openImportModal = (preselectedStoreId?: string) => {
+    const preferred =
+      preselectedStoreId && activeStores.some(s => s.id === preselectedStoreId)
+        ? preselectedStoreId
+        : selectedInventoryStore && selectedInventoryStore.status === 'ACTIVE'
+          ? selectedInventoryStore.id
+          : activeStores[0]?.id || '';
+    setImportTargetStoreId(preferred);
+    setImportFile(null);
+    setImportParseResult(null);
+    if (importFileInputRef.current) importFileInputRef.current.value = '';
+    setIsImportModalOpen(true);
+  };
+
+  const handleStoreExcelFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!importTargetStoreId) {
+      addToast({
+        type: 'warning',
+        title: 'Select Store First',
+        description: 'Choose the destination store before selecting an Excel file.',
+      });
+      if (importFileInputRef.current) importFileInputRef.current.value = '';
+      return;
+    }
+
+    setImportFile(file);
+    setIsParsingImport(true);
+    const result = await ExcelImportService.parseExcelFile(file);
+    setIsParsingImport(false);
+    setImportParseResult(result);
+
+    if (result.errors.length > 0 && result.rows.length === 0) {
+      addToast({
+        type: 'error',
+        title: 'Invalid Excel Format',
+        description: result.errors[0]?.message || 'Could not read products from file.',
+      });
+    } else if (result.errors.length > 0) {
+      addToast({
+        type: 'warning',
+        title: 'Validation Issues',
+        description: `${result.rows.length} valid rows, ${result.errors.length} error(s).`,
+      });
+    } else {
+      addToast({
+        type: 'success',
+        title: 'Excel Ready',
+        description: `${result.rows.length} products ready to import.`,
+      });
+    }
+  };
+
+  const handleCommitStoreExcelImport = () => {
+    if (!importParseResult || importParseResult.rows.length === 0) return;
+
+    const targetStore = activeStores.find(s => s.id === importTargetStoreId);
+    if (!targetStore) {
+      addToast({
+        type: 'warning',
+        title: 'Select Store First',
+        description: 'Please select an active destination store.',
+      });
+      return;
+    }
+
+    setIsCommittingImport(true);
+    const res = ExcelImportService.commitImport(
+      importParseResult.rows,
+      targetStore.shopId,
+      currentUser,
+      targetStore.id
+    );
+    setIsCommittingImport(false);
+
+    if (res.success) {
+      const shopName = accessibleShops.find(s => s.id === targetStore.shopId)?.name || 'Shop';
+      addToast({
+        type: 'success',
+        title: 'Store Import Successful',
+        description: `${res.created} created, ${res.updated} updated in ${targetStore.name} (${shopName}).`,
+      });
+      setIsImportModalOpen(false);
+      setImportFile(null);
+      setImportParseResult(null);
+      if (importFileInputRef.current) importFileInputRef.current.value = '';
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Import Completed with Errors',
+        description: `${res.created} created, ${res.updated} updated, ${res.errors.length} error(s).`,
+      });
+    }
+  };
+
+  const handleExportStoreExcel = (store: Store, customProducts?: Product[]) => {
+    const res = ExcelExportService.exportStoreProducts(store, customProducts);
+    if (res.success) {
+      addToast({
+        type: 'success',
+        title: 'Store Excel Exported',
+        description: `${res.rowCount} products saved to ${res.fileName}`,
+      });
+    } else {
+      addToast({
+        type: 'warning',
+        title: 'Nothing to Export',
+        description: res.error || `No products available in ${store.name}.`,
+      });
+    }
+  };
+
+  const handleExportInventoryExcel = () => {
+    if (selectedInventoryStore) {
+      handleExportStoreExcel(selectedInventoryStore, inventoryProducts);
+      return;
+    }
+    const res = ExcelExportService.exportCombinedStoresProducts(
+      accessibleStores,
+      inventoryProducts
+    );
+    if (res.success) {
+      addToast({
+        type: 'success',
+        title: 'Inventory Exported',
+        description: `${res.rowCount} products saved to ${res.fileName}`,
+      });
+    } else {
+      addToast({
+        type: 'warning',
+        title: 'Nothing to Export',
+        description: res.error || 'No products found to export.',
+      });
+    }
+  };
+
   return (
     <div
       id="admin-stores-view"
@@ -531,6 +698,16 @@ export const AdminStores: React.FC = () => {
               <span>Transfer Stock</span>
             </button>
           </div>
+
+          <button
+            type="button"
+            onClick={() => openImportModal()}
+            disabled={activeStores.length === 0}
+            className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-semibold text-xs transition disabled:opacity-45 disabled:cursor-not-allowed"
+          >
+            <Upload className="w-4 h-4" />
+            <span>Import Excel</span>
+          </button>
 
           <button
             id="create-store-btn"
@@ -708,10 +885,28 @@ export const AdminStores: React.FC = () => {
                           setInvStockedOnly(true);
                           setActiveSubTab('inventory');
                         }}
-                        className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-300 font-semibold transition"
+                        className="flex-1 min-w-[110px] flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-300 font-semibold transition"
                       >
                         <Eye className="w-3.5 h-3.5" />
                         <span>View Inventory</span>
+                      </button>
+                      {isActive && (
+                        <button
+                          type="button"
+                          onClick={() => openImportModal(store.id)}
+                          className="flex items-center justify-center gap-1 py-2 px-3 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/25 font-semibold transition"
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>Import</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleExportStoreExcel(store)}
+                        className="flex items-center justify-center gap-1 py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Export</span>
                       </button>
                       {isActive && !store.isShopFloor && (
                         <button
@@ -720,7 +915,7 @@ export const AdminStores: React.FC = () => {
                             handleSourceStoreChange(store.id);
                             setActiveSubTab('transfer');
                           }}
-                          className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-blue-600/15 hover:bg-blue-600/25 text-blue-300 font-semibold transition"
+                          className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-blue-600/15 hover:bg-blue-600/25 text-blue-300 font-semibold transition"
                         >
                           <ArrowRightLeft className="w-3.5 h-3.5" />
                           <span>Transfer</span>
@@ -736,15 +931,11 @@ export const AdminStores: React.FC = () => {
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleToggleStoreStatus(store)}
-                        className={`flex items-center justify-center gap-1 py-2 px-3 rounded-lg font-semibold transition ${
-                          isActive
-                            ? 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-300'
-                            : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300'
-                        }`}
+                        onClick={() => setDeletingStore(store)}
+                        className="flex items-center justify-center gap-1 py-2 px-3 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/20 font-semibold transition"
                       >
-                        <Power className="w-3.5 h-3.5" />
-                        <span>{isActive ? 'Off' : 'On'}</span>
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Delete</span>
                       </button>
                     </div>
                   </div>
@@ -820,26 +1011,57 @@ export const AdminStores: React.FC = () => {
               </div>
             </div>
 
-            {selectedInventoryStore && (
-              <div className="flex items-center justify-between pt-1 border-t border-slate-800/70">
-                <span className="text-[11px] text-slate-400">
-                  Viewing{' '}
-                  <strong className="text-white">{selectedInventoryStore.name}</strong>
-                  {selectedInventoryStore.isShopFloor ? ' (POS Sellable Floor)' : ' (Warehouse)'}
-                </span>
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/70">
+              <div className="flex items-center gap-2 flex-wrap">
+                {selectedInventoryStore ? (
+                  <>
+                    <span className="text-[11px] text-slate-400">
+                      Viewing{' '}
+                      <strong className="text-white">{selectedInventoryStore.name}</strong>
+                      {selectedInventoryStore.isShopFloor ? ' (POS Sellable Floor)' : ' (Warehouse)'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setInvStockedOnly(v => !v)}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition ${
+                        invStockedOnly
+                          ? 'bg-blue-600/20 border-blue-500/40 text-blue-300'
+                          : 'bg-slate-950 border-slate-800 text-slate-400'
+                      }`}
+                    >
+                      {invStockedOnly ? 'Stocked Here Only' : 'Show All Shop Items'}
+                    </button>
+                  </>
+                ) : (
+                  <span className="text-[11px] text-slate-400">
+                    Showing combined inventory across {accessibleStores.length} store(s)
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setInvStockedOnly(v => !v)}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition ${
-                    invStockedOnly
-                      ? 'bg-blue-600/20 border-blue-500/40 text-blue-300'
-                      : 'bg-slate-950 border-slate-800 text-slate-400'
-                  }`}
+                  onClick={() => openImportModal(selectedInventoryStore?.id)}
+                  disabled={activeStores.length === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 text-[11px] font-semibold transition disabled:opacity-45"
                 >
-                  {invStockedOnly ? 'Stocked Here Only' : 'Show All Shop Items'}
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Import Excel</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportInventoryExcel}
+                  disabled={inventoryProducts.length === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 text-blue-300 text-[11px] font-semibold transition disabled:opacity-45"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>
+                    Export Excel{selectedInventoryStore ? ` (${selectedInventoryStore.name})` : ''}
+                  </span>
                 </button>
               </div>
-            )}
+            </div>
           </div>
 
           {/* Store-Scoped Inventory KPIs */}
@@ -1432,6 +1654,238 @@ export const AdminStores: React.FC = () => {
           </div>
         </div>
       )}
+      {/* Store 4-Column Excel Import Modal */}
+      {isImportModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-2xl max-w-lg w-full p-4 sm:p-6 shadow-2xl max-h-[92vh] overflow-y-auto space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <FileSpreadsheet className="w-5 h-5 text-emerald-400" />
+                <div>
+                  <h3 className="text-base font-bold text-white">Import Excel to Store</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Accepts: Product Name, Buying Price, Selling Price, Quantity
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsImportModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">
+                  Target Store <span className="text-rose-400">*</span>
+                </label>
+                <select
+                  value={importTargetStoreId}
+                  onChange={e => setImportTargetStoreId(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="">-- Select a store --</option>
+                  {activeStores.map(st => {
+                    const sh = accessibleShops.find(s => s.id === st.shopId);
+                    return (
+                      <option key={st.id} value={st.id}>
+                        {st.name}
+                        {st.isShopFloor ? ' (POS Floor)' : ''} — {sh?.name || 'Shop'}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">
+                  Excel File (.xlsx / .xls / .csv) <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  ref={importFileInputRef}
+                  type="file"
+                  accept=".xlsx,.xls,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                  disabled={!importTargetStoreId}
+                  onChange={handleStoreExcelFileSelected}
+                  className="w-full bg-slate-950 text-xs text-slate-300 file:mr-2 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-500 cursor-pointer p-1.5 rounded-xl border border-slate-800 disabled:opacity-40"
+                />
+                {!importTargetStoreId && (
+                  <p className="text-[10px] text-amber-400 mt-1">
+                    Select a store above to enable file upload.
+                  </p>
+                )}
+              </div>
+
+              <div className="p-3 bg-blue-950/30 border border-blue-800/40 rounded-xl text-[11px] text-blue-200">
+                <strong>Expected Excel Columns:</strong>
+                <div className="mt-1 font-mono text-[10px] text-blue-100 overflow-x-auto whitespace-nowrap">
+                  Product Name | Buying Price | Selling Price | Quantity
+                </div>
+              </div>
+            </div>
+
+            {isParsingImport && (
+              <div className="p-5 bg-slate-950 rounded-xl border border-slate-800 text-center text-slate-400 text-xs">
+                <RefreshCw className="w-5 h-5 mx-auto mb-2 animate-spin text-blue-400" />
+                Reading Excel spreadsheet...
+              </div>
+            )}
+
+            {importParseResult && !isParsingImport && (
+              <div className="space-y-3 border-t border-slate-800 pt-3">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-white truncate">
+                    {importFile?.name || 'Spreadsheet'}
+                  </span>
+                  <span className="text-[11px] text-slate-400">
+                    Valid: <strong className="text-emerald-400">{importParseResult.rows.length}</strong> · Errors:{' '}
+                    <strong className="text-rose-400">{importParseResult.errors.length}</strong>
+                  </span>
+                </div>
+
+                {importParseResult.errors.length > 0 && (
+                  <div className="p-2.5 bg-rose-950/25 border border-rose-800/40 rounded-xl max-h-32 overflow-y-auto space-y-1 text-[11px] text-rose-200">
+                    {importParseResult.errors.map((err, i) => (
+                      <div key={i}>
+                        <span className="font-mono text-[10px] bg-rose-900/60 px-1 py-0.2 rounded mr-1.5">
+                          Row {err.rowNumber}
+                        </span>
+                        {err.message}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {importParseResult.rows.length > 0 && (
+                  <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                    {importParseResult.rows.slice(0, 15).map((r, idx) => (
+                      <div
+                        key={idx}
+                        className="p-2 rounded-lg bg-slate-950 border border-slate-800 text-xs flex items-center justify-between gap-2"
+                      >
+                        <span className="font-semibold text-white truncate">{r.productName}</span>
+                        <span className="text-[11px] font-mono text-slate-400 shrink-0">
+                          Buy {r.buyingPrice.toLocaleString()} ·{' '}
+                          <strong className="text-emerald-400">{r.sellingPrice.toLocaleString()}</strong> · Qty{' '}
+                          <strong className="text-blue-300">{r.quantity}</strong>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="pt-2 border-t border-slate-800 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsImportModalOpen(false)}
+                className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleCommitStoreExcelImport}
+                disabled={
+                  isCommittingImport ||
+                  !importTargetStoreId ||
+                  !importParseResult ||
+                  importParseResult.rows.length === 0
+                }
+                className="px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition disabled:opacity-45 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>
+                  {isCommittingImport
+                    ? 'Importing...'
+                    : `Import (${importParseResult?.rows.length || 0}) to ${
+                        activeStores.find(s => s.id === importTargetStoreId)?.name || 'Store'
+                      }`}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Store Delete Confirmation Modal */}
+      {deletingStore && (() => {
+        const deletingShop = accessibleShops.find(s => s.id === deletingStore.shopId);
+        const stockedItems = accessibleProducts.filter(
+          p => p.shopId === deletingStore.shopId && getProductQtyInStore(p, deletingStore) > 0
+        );
+        const stockedUnits = stockedItems.reduce(
+          (sum, p) => sum + getProductQtyInStore(p, deletingStore),
+          0
+        );
+        return (
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4">
+            <div className="bg-slate-900 border border-rose-800/60 rounded-t-2xl sm:rounded-2xl max-w-md w-full p-4 sm:p-6 shadow-2xl space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2.5 text-rose-400">
+                  <div className="p-2 rounded-xl bg-rose-950/80 border border-rose-800/50">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm sm:text-base font-bold text-white">Delete Store?</h3>
+                    <p className="text-[11px] text-slate-400">
+                      {deletingStore.name}
+                      {deletingShop ? ` — ${deletingShop.name}` : ''}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDeletingStore(null)}
+                  className="text-slate-400 hover:text-white p-1"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs text-slate-300 space-y-1.5">
+                <p>
+                  Are you sure you want to permanently delete{' '}
+                  <strong className="text-white">{deletingStore.name}</strong>?
+                </p>
+                {stockedUnits > 0 ? (
+                  <p className="text-amber-300 text-[11px]">
+                    This store currently holds{' '}
+                    <strong className="font-mono">{stockedUnits.toLocaleString()}</strong> units across{' '}
+                    <strong className="font-mono">{stockedItems.length}</strong> product(s).
+                    Deleting the store removes its store-level stock count while preserving sales history and shop floor inventory.
+                  </p>
+                ) : (
+                  <p className="text-slate-400 text-[11px]">
+                    This action removes the store from Stores &amp; Transfers and queues deletion across synced devices.
+                  </p>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setDeletingStore(null)}
+                  className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleConfirmDeleteStore(deletingStore)}
+                  className="px-4 py-2.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition flex items-center gap-1.5"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Delete Store</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

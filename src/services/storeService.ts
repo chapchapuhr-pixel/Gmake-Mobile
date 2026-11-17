@@ -232,6 +232,131 @@ export class StoreService {
     return { success: true, store: updatedStore };
   }
 
+  public static deleteStore(
+    id: string,
+    currentUser: User
+  ): { success: boolean; store?: Store; error?: string } {
+    if (!hasAdminAccess(currentUser)) {
+      return {
+        success: false,
+        error: 'Permission Denied: Only Admins or Shop Admins can delete stores.',
+      };
+    }
+
+    const stores = db.getStores();
+    const store = stores.find(s => s.id === id);
+    if (!store) {
+      return { success: false, error: 'Store not found.' };
+    }
+
+    if (!isPlatformAdmin(currentUser) && !canAccessShopAsAdmin(currentUser, store.shopId)) {
+      return {
+        success: false,
+        error: 'Permission Denied: You can only delete stores in your managed shop.',
+      };
+    }
+
+    const now = new Date().toISOString();
+    const remainingStores = stores.filter(s => s.id !== id);
+    const floorStoreIds = new Set(
+      remainingStores
+        .filter(s => s.shopId === store.shopId && s.isShopFloor)
+        .map(s => s.id)
+    );
+    const remainingWarehouseInShop = remainingStores.filter(
+      s => s.shopId === store.shopId && !s.isShopFloor && s.status === 'ACTIVE'
+    );
+
+    // Clean up deleted store's entries from products in that shop
+    const products = [...db.getProducts()];
+    let productsChanged = false;
+    const updatedProducts = products.map(p => {
+      if (p.shopId !== store.shopId) return p;
+
+      const hadStoreStockEntry = Boolean(p.storeStocks && id in p.storeStocks);
+      const hadStoreDetailEntry = Boolean(p.storeDetails && id in p.storeDetails);
+      const wasLegacySingleWarehouse =
+        !store.isShopFloor &&
+        (!p.storeStocks || Object.keys(p.storeStocks).length === 0) &&
+        remainingWarehouseInShop.length === 0 &&
+        Number(p.storeStock || 0) > 0;
+
+      if (!hadStoreStockEntry && !hadStoreDetailEntry && !wasLegacySingleWarehouse) {
+        return p;
+      }
+
+      productsChanged = true;
+      const nextStoreStocks = p.storeStocks ? { ...p.storeStocks } : undefined;
+      if (nextStoreStocks) {
+        delete nextStoreStocks[id];
+      }
+
+      const nextStoreDetails = p.storeDetails ? { ...p.storeDetails } : undefined;
+      if (nextStoreDetails) {
+        delete nextStoreDetails[id];
+      }
+
+      let nextWarehouseStock = Number(p.storeStock || 0);
+      if (wasLegacySingleWarehouse) {
+        nextWarehouseStock = 0;
+      } else if (nextStoreStocks) {
+        nextWarehouseStock = Object.entries(nextStoreStocks).reduce((sum, [sid, qty]) => {
+          return floorStoreIds.has(sid) ? sum : sum + Math.max(0, Number(qty || 0));
+        }, 0);
+      }
+
+      const updatedProd = {
+        ...p,
+        storeStock: nextWarehouseStock,
+        ...(nextStoreStocks !== undefined ? { storeStocks: nextStoreStocks } : {}),
+        ...(nextStoreDetails !== undefined ? { storeDetails: nextStoreDetails } : {}),
+        updatedAt: now,
+      };
+
+      db.enqueueSync({
+        id: generateUUID(),
+        operation: 'UPDATE_PRODUCT',
+        entityType: 'PRODUCT',
+        entityId: updatedProd.id,
+        payload: { ...updatedProd, storeId: undefined },
+        status: 'PENDING',
+        createdAt: now,
+      });
+
+      return updatedProd;
+    });
+
+    if (productsChanged) {
+      db.saveProducts(updatedProducts);
+    }
+
+    db.saveStores(remainingStores);
+
+    db.enqueueSync({
+      id: generateUUID(),
+      operation: 'DELETE_STORE',
+      entityType: 'STORE',
+      entityId: id,
+      payload: { id, shopId: store.shopId },
+      status: 'PENDING',
+      createdAt: now,
+    });
+
+    db.addAuditLog({
+      id: generateUUID(),
+      userId: currentUser.id,
+      userName: currentUser.name,
+      action: 'DELETE_STORE',
+      details: `Deleted store "${store.name}"${store.location ? ` (${store.location})` : ''}`,
+      entityType: 'STORE',
+      entityId: store.id,
+      shopId: store.shopId,
+      timestamp: now,
+    });
+
+    return { success: true, store };
+  }
+
   public static transferStoreToShop(
     params: {
       storeId: string;

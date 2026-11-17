@@ -180,7 +180,7 @@ export interface MigrationCommitResult {
 const HEADER_SYNONYMS: Record<CanonicalImportField, string[]> = {
   action: ['action', 'actions'],
   sku: ['sku', 'productsku', 'itemcode', 'code', 'barcode'],
-  productName: ['productname', 'product', 'name', 'title', 'itemname', 'item'],
+  productName: ['productname', 'product', 'products', 'name', 'title', 'itemname', 'item'],
   variation: ['variation', 'variant', 'variations', 'size', 'color', 'option'],
   category: ['category', 'categories', 'productcategory', 'group'],
   location: ['location', 'store', 'storename', 'warehouse', 'branchlocation', 'outlet'],
@@ -192,6 +192,9 @@ const HEADER_SYNONYMS: Record<CanonicalImportField, string[]> = {
     'costprice',
     'unitcost',
     'cost',
+    'buy',
+    'purchase',
+    'bp',
   ],
   sellingPrice: [
     'unitsellingprice',
@@ -201,6 +204,9 @@ const HEADER_SYNONYMS: Record<CanonicalImportField, string[]> = {
     'unitprice',
     'retailprice',
     'price',
+    'sell',
+    'sale',
+    'sp',
   ],
   quantity: [
     'currentstock',
@@ -211,6 +217,8 @@ const HEADER_SYNONYMS: Record<CanonicalImportField, string[]> = {
     'units',
     'onhand',
     'available',
+    'count',
+    'balance',
   ],
   purchaseValue: [
     'currentstockvaluebypurchaseprice',
@@ -436,7 +444,17 @@ export class ExcelImportService {
         }
       }
 
-      const headerCells = (rawAoa[headerRowIndex] || []).map((c, idx) => {
+      const rawHeaderRow = rawAoa[headerRowIndex] || [];
+      let lastNamedHeaderIdx = -1;
+      for (let i = rawHeaderRow.length - 1; i >= 0; i--) {
+        if (String(rawHeaderRow[i] ?? '').trim() !== '') {
+          lastNamedHeaderIdx = i;
+          break;
+        }
+      }
+      const trimmedHeaderRow =
+        lastNamedHeaderIdx >= 0 ? rawHeaderRow.slice(0, lastNamedHeaderIdx + 1) : rawHeaderRow;
+      const headerCells = trimmedHeaderRow.map((c, idx) => {
         const val = String(c ?? '').trim();
         return val || `Column_${idx + 1}`;
       });
@@ -615,7 +633,9 @@ export class ExcelImportService {
       };
     }
 
-    if (sonkoRichSignals >= 2 || headers.length >= 10) {
+    const namedHeadersCount = headers.filter(h => !/^Column_\d+$/.test(h)).length;
+
+    if (sonkoRichSignals >= 2 || namedHeadersCount >= 10) {
       const hasCore = Boolean(mapping.productName && mapping.sellingPrice && mapping.quantity);
       return {
         format: 'SONKO_19_COL',
@@ -1322,6 +1342,9 @@ export class ExcelImportService {
     const allProducts = [...db.getProducts()];
     const allStoresInShop = db.getStores().filter(s => s.shopId === opts.shopId);
     const floorStoreIds = new Set(allStoresInShop.filter(s => s.isShopFloor).map(s => s.id));
+    const nonFloorStoresInShop = allStoresInShop.filter(
+      s => !s.isShopFloor && s.status === 'ACTIVE'
+    );
     const now = new Date().toISOString();
 
     let created = 0;
@@ -1334,6 +1357,7 @@ export class ExcelImportService {
       try {
         const existingIndex = allProducts.findIndex(
           p =>
+            p.status !== 'INACTIVE' &&
             p.shopId === opts.shopId &&
             p.name.toLowerCase().trim() === row.productName.toLowerCase().trim() &&
             !p.variation
@@ -1350,10 +1374,16 @@ export class ExcelImportService {
 
           if (isToStore && targetStore) {
             const nextStoreStocks = { ...(existing.storeStocks || {}) };
+            const hasAnyMappedStores =
+              Boolean(existing.storeStocks) && Object.keys(existing.storeStocks || {}).length > 0;
             const prevInStore =
               nextStoreStocks[targetStore.id] !== undefined
                 ? Number(nextStoreStocks[targetStore.id] || 0)
-                : Number(existing.storeStock || 0);
+                : targetStore.isShopFloor
+                  ? Number(existing.currentStock || 0)
+                  : !hasAnyMappedStores && nonFloorStoresInShop.length <= 1
+                    ? Number(existing.storeStock || 0)
+                    : 0;
             const nextInStore =
               opts.strategy === 'RESTORE_REPLACE' ? row.quantity : prevInStore + row.quantity;
             nextStoreStocks[targetStore.id] = nextInStore;
@@ -1382,7 +1412,10 @@ export class ExcelImportService {
               ...existing,
               purchasePrice: row.buyingPrice > 0 ? row.buyingPrice : existing.purchasePrice,
               sellingPrice: row.sellingPrice,
-              storeStock: totalWarehouse,
+              currentStock: targetStore.isShopFloor ? nextInStore : existing.currentStock,
+              storeStock: targetStore.isShopFloor
+                ? existing.storeStock || 0
+                : totalWarehouse,
               storeStocks: nextStoreStocks,
               storeDetails: nextStoreDetails,
               updatedAt: now,
@@ -1463,6 +1496,7 @@ export class ExcelImportService {
           const sku = `SKU-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 900 + 100)}`;
           const barcode = `${Math.floor(100000000000 + Math.random() * 900000000000)}`;
           const isToStore = Boolean(targetStore);
+          const isWarehouseStore = Boolean(targetStore && !targetStore.isShopFloor);
 
           const newProduct: Product = {
             id: productId,
@@ -1473,8 +1507,8 @@ export class ExcelImportService {
             categoryId: '',
             sellingPrice: row.sellingPrice,
             purchasePrice: row.buyingPrice || 0,
-            currentStock: isToStore ? 0 : row.quantity,
-            storeStock: isToStore ? row.quantity : 0,
+            currentStock: isWarehouseStore ? 0 : row.quantity,
+            storeStock: isWarehouseStore ? row.quantity : 0,
             ...(isToStore && targetStore
               ? {
                   storeStocks: { [targetStore.id]: row.quantity },

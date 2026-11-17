@@ -45,6 +45,7 @@ const OP_ORDER: Record<string, number> = {
 
   // Cleanup
   DELETE_SHOP: 90,
+  DELETE_STORE: 90,
   DELETE_PRODUCT_DEEP: 90,
 };
 

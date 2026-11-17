@@ -376,6 +376,7 @@ export type SyncOperation =
   | 'DELETE_SHOP'
   | 'CREATE_STORE'
   | 'UPDATE_STORE'
+  | 'DELETE_STORE'
   | 'TRANSFER_STORE_TO_SHOP'
   | 'CREATE_CATEGORY'
   | 'UPDATE_CATEGORY'

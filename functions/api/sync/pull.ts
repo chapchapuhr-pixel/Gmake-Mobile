@@ -27,6 +27,18 @@ export async function onRequestGet(context: any) {
     state.shops = shopsResult.results;
 
     // ═══════════════════════════════════════════════════════
+    // STORES (WAREHOUSES)
+    // ═══════════════════════════════════════════════════════
+    try {
+      const storesResult = await env.DB.prepare(
+        'SELECT * FROM stores WHERE updated_at > ?'
+      ).bind(since).all();
+      state.stores = storesResult.results;
+    } catch {
+      state.stores = [];
+    }
+
+    // ═══════════════════════════════════════════════════════
     // USERS (always ALL — permissions may change)
     // ═══════════════════════════════════════════════════════
     const usersResult = await env.DB.prepare('SELECT * FROM users').all();

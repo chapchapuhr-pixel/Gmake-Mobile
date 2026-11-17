@@ -343,6 +343,8 @@ export type SyncOperation =
   | 'CREATE_STORE'
   | 'UPDATE_STORE'
   | 'TRANSFER_STORE_TO_SHOP'
+  | 'CREATE_CATEGORY'
+  | 'UPDATE_CATEGORY'
   | 'CREATE_SALE_EDIT_REQUEST'
   | 'REVIEW_SALE_EDIT_REQUEST'
   | 'CREATE_DEBT'
@@ -358,6 +360,9 @@ export interface SyncQueueItem {
   payload: any;
   status: 'PENDING' | 'SYNCED' | 'FAILED';
   retryCount?: number;
+  syncedAt?: string;
+  failedAt?: string;
+  lastError?: string;
   timestamp?: string;
   createdAt: string;
 }

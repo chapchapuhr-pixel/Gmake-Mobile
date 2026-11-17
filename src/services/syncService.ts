@@ -1,14 +1,59 @@
-// src/services/syncService.ts (MOBILE - MATCHES WINDOWS)
+// src/services/syncService.ts
 import { db } from '../db/storage';
-import { SyncQueueItem, User } from '../types';
+import { SaleEditRequest, SyncQueueItem, User } from '../types';
 import { CloudflareApi } from './cloudflareApi';
 
 export type SyncState = 'OFFLINE_LOCAL' | 'PENDING_SYNC' | 'SYNCING' | 'SYNCED';
 
+const OP_ORDER: Record<string, number> = {
+  // Tier 1 — roots
+  CREATE_SHOP: 1,
+  UPDATE_SHOP: 1,
+  TOGGLE_SHOP_STATUS: 1,
+
+  // Tier 2 — depend on shops
+  CREATE_CATEGORY: 2,
+  UPDATE_CATEGORY: 2,
+  CREATE_STORE: 2,
+  UPDATE_STORE: 2,
+  CREATE_SELLER: 2,
+  UPDATE_SELLER: 2,
+  DELETE_SELLER: 2,
+
+  // Tier 3 — depend on categories/stores/users
+  CREATE_PRODUCT: 3,
+  UPDATE_PRODUCT: 3,
+  TOGGLE_PRODUCT_STATUS: 3,
+  DELETE_PRODUCT: 3,
+  STOCK_ADJUSTMENT: 3,
+
+  // Tier 4 — inventory transactions
+  CREATE_PURCHASE: 4,
+  UPDATE_PURCHASE: 4,
+  TRANSFER_STORE_TO_SHOP: 4,
+
+  // Tier 5 — sales & downstream
+  CREATE_SALE: 5,
+  UPDATE_SALE: 5,
+  VOID_SALE: 5,
+  CREATE_SALE_EDIT_REQUEST: 5,
+  REVIEW_SALE_EDIT_REQUEST: 5,
+  CREATE_EXPENSE: 5,
+  CREATE_DEBT: 5,
+  UPDATE_DEBT: 5,
+  DELETE_DEBT: 5,
+
+  // Cleanup
+  DELETE_SHOP: 90,
+  DELETE_PRODUCT_DEEP: 90,
+};
+
 export class SyncService {
   private static isSimulatingSync = false;
   private static isSyncing = false;
-  private static lastSyncedAt: string | null = localStorage.getItem('omnibiz_last_synced_at');
+  private static lastSyncedAt: string | null = localStorage.getItem(
+    'omnibiz_last_synced_at'
+  );
   private static lastSyncAttempt: number = 0;
   private static readonly SYNC_INTERVAL_MS = 60000;
   private static hasLocalChanges = false;
@@ -34,7 +79,12 @@ export class SyncService {
     return db.getSyncQueue().filter(item => item.status === 'PENDING').length;
   }
 
-  public static getSyncStats(): { total: number; pending: number; synced: number; failed: number } {
+  public static getSyncStats(): {
+    total: number;
+    pending: number;
+    synced: number;
+    failed: number;
+  } {
     const queue = db.getSyncQueue();
     return {
       total: queue.length,
@@ -44,7 +94,11 @@ export class SyncService {
     };
   }
 
-  public static getSyncStatus(): { state: SyncState; pendingCount: number; lastSyncedAt?: string } {
+  public static getSyncStatus(): {
+    state: SyncState;
+    pendingCount: number;
+    lastSyncedAt?: string;
+  } {
     const queue = db.getSyncQueue();
     const pending = queue.filter(q => q.status === 'PENDING').length;
 
@@ -71,10 +125,117 @@ export class SyncService {
     };
   }
 
+  /**
+   * Sort PENDING queue items by dependency tier first, then chronologically (oldest first)
+   * because db.enqueueSync prepends newest items at index 0.
+   */
+  public static sortPendingItems(items: SyncQueueItem[]): SyncQueueItem[] {
+    return [...items].sort((a, b) => {
+      const opA = (a.operation || a.action) as string;
+      const opB = (b.operation || b.action) as string;
+      const tierDiff = (OP_ORDER[opA] ?? 99) - (OP_ORDER[opB] ?? 99);
+      if (tierDiff !== 0) return tierDiff;
+      return (
+        new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+      );
+    });
+  }
+
+  /**
+   * Push PENDING items only (without forcing a pull) using topological OP_ORDER
+   * sorting and per-item reconciliation. Used by AppContext background auto-push.
+   */
+  public static async pushPendingOnly(): Promise<{
+    success: boolean;
+    processedCount: number;
+    failedCount: number;
+    errors: any[];
+    results: any[];
+  }> {
+    const pendingItems = db.getSyncQueue().filter(item => item.status === 'PENDING');
+    if (pendingItems.length === 0) {
+      return {
+        success: true,
+        processedCount: 0,
+        failedCount: 0,
+        errors: [],
+        results: [],
+      };
+    }
+
+    const sorted = this.sortPendingItems(pendingItems);
+    const operations = sorted.map(item => ({
+      id: item.id,
+      operation: item.operation || item.action,
+      entityType: item.entityType,
+      entityId: item.entityId,
+      payload: item.payload,
+    }));
+
+    const pushResult = await CloudflareApi.pushSync(operations);
+
+    const pushSuccess = pushResult.success === true;
+    const pushErrors = pushResult.errors || [];
+    const pushResults = pushResult.results || [];
+
+    // ── Per-item reconciliation ──
+    const okIds = new Set<string>(pushResults.map((r: any) => r.id));
+    const failedMap = new Map<string, string>();
+    for (const err of pushErrors) {
+      failedMap.set(err.id, err.error || 'Unknown error');
+    }
+
+    const now = new Date().toISOString();
+    const reconciledQueue = db.getSyncQueue().map(item => {
+      if (item.status !== 'PENDING') return item;
+
+      if (okIds.has(item.id)) {
+        return { ...item, status: 'SYNCED' as const, syncedAt: now };
+      }
+
+      if (failedMap.has(item.id)) {
+        const errMsg = failedMap.get(item.id)!;
+        console.error(
+          `[sync] ${item.operation || item.action} failed for ${item.entityId}: ${errMsg}`
+        );
+        return {
+          ...item,
+          status: 'FAILED' as const,
+          lastError: errMsg,
+          failedAt: now,
+          retryCount: (item.retryCount || 0) + 1,
+        };
+      }
+
+      // Server neither acked nor errored → keep pending
+      return item;
+    });
+    db.saveSyncQueue(reconciledQueue);
+
+    if (pushSuccess) {
+      this.lastSyncedAt = now;
+      localStorage.setItem('omnibiz_last_synced_at', now);
+    } else {
+      console.warn(
+        `[sync] Push partial: ${pushResults.length} ok, ${pushErrors.length} failed`,
+        pushErrors
+      );
+    }
+
+    return {
+      success: pushSuccess,
+      processedCount: pushResults.length,
+      failedCount: pushErrors.length,
+      errors: pushErrors,
+      results: pushResults,
+    };
+  }
+
   public static async processSyncQueue(
-    currentUser?: User
+    _currentUser?: User,
+    force: boolean = false
   ): Promise<{ success: boolean; processedCount: number; message?: string }> {
-    if (!this.shouldSync() && !this.isSyncing) {
+    if (!force && !this.shouldSync() && !this.isSyncing) {
       return {
         success: true,
         processedCount: 0,
@@ -93,45 +254,43 @@ export class SyncService {
     }
 
     if (SyncService.isSyncing) {
-      return { success: false, processedCount: 0, message: 'Sync already in progress' };
+      return {
+        success: false,
+        processedCount: 0,
+        message: 'Sync already in progress',
+      };
     }
 
     SyncService.isSyncing = true;
     this.lastSyncAttempt = Date.now();
 
     try {
-      const queue = db.getSyncQueue();
-      const pendingItems = queue.filter(item => item.status === 'PENDING');
+      const pendingBefore = this.getPendingCount();
 
-      // 1. PUSH local changes if any
-      if (pendingItems.length > 0) {
-        const operations = pendingItems.map(item => ({
-          id: item.id,
-          operation: item.operation || item.action,
-          entityType: item.entityType,
-          entityId: item.entityId,
-          payload: item.payload,
-        }));
+      let pushSuccess = true;
+      let pushErrors: any[] = [];
+      let pushResults: any[] = [];
 
-        const pushResult = await CloudflareApi.pushSync(operations);
-
-        if (pushResult.success) {
-          const updatedQueue = queue.map(item => {
-            if (item.status === 'PENDING') {
-              return { ...item, status: 'SYNCED' as const };
-            }
-            return item;
-          });
-          db.saveSyncQueue(updatedQueue);
-
-          this.lastSyncedAt = new Date().toISOString();
-          localStorage.setItem('omnibiz_last_synced_at', this.lastSyncedAt);
-        }
+      // ───────────────────────────────────────────────────────────
+      // 1. PUSH
+      // ───────────────────────────────────────────────────────────
+      if (pendingBefore > 0) {
+        const pushOutcome = await this.pushPendingOnly();
+        pushSuccess = pushOutcome.success;
+        pushErrors = pushOutcome.errors;
+        pushResults = pushOutcome.results;
       }
 
-      // 2. PULL latest cloud data
-      if (pendingItems.length > 0 || this.hasLocalChanges) {
-        const pullResult = await CloudflareApi.pullSync(this.lastSyncedAt || undefined);
+      // ───────────────────────────────────────────────────────────
+      // 2. PULL (only if push fully succeeded OR forced/local changes)
+      // ───────────────────────────────────────────────────────────
+      const canPull =
+        pushSuccess && (force || pendingBefore > 0 || this.hasLocalChanges);
+
+      if (canPull) {
+        const pullResult = await CloudflareApi.pullSync(
+          force ? undefined : this.lastSyncedAt || undefined
+        );
 
         if (pullResult.success && pullResult.data) {
           this.applyCloudData(pullResult.data);
@@ -143,10 +302,25 @@ export class SyncService {
       this.hasLocalChanges = false;
       SyncService.isSyncing = false;
 
+      // ───────────────────────────────────────────────────────────
+      // 3. Honest return value
+      // ───────────────────────────────────────────────────────────
+      if (!pushSuccess) {
+        const firstError = pushErrors[0]?.error || 'unknown';
+        return {
+          success: false,
+          processedCount: pushResults.length,
+          message: `Sync partial: ${pushResults.length} pushed, ${pushErrors.length} failed. First error: ${firstError}`,
+        };
+      }
+
       return {
         success: true,
-        processedCount: pendingItems.length,
-        message: `Cloud sync complete: ${pendingItems.length} pushed, cloud data pulled.`,
+        processedCount: pendingBefore,
+        message:
+          pendingBefore > 0
+            ? `Cloud sync complete: ${pendingBefore} pushed, cloud data pulled.`
+            : 'Cloud sync complete: all records up to date.',
       };
     } catch (error: any) {
       SyncService.isSyncing = false;
@@ -158,7 +332,26 @@ export class SyncService {
     }
   }
 
-  public static async simulateServerSync(): Promise<{ success: boolean; syncedCount: number }> {
+  // Retry failed items by flipping them back to PENDING.
+  public static retryFailed(): void {
+    const queue = db.getSyncQueue().map(item =>
+      item.status === 'FAILED'
+        ? ({ ...item, status: 'PENDING' as const } as SyncQueueItem)
+        : item
+    );
+    db.saveSyncQueue(queue);
+  }
+
+  // Drop FAILED items (e.g. after user acknowledges).
+  public static clearFailed(): void {
+    const queue = db.getSyncQueue().filter(q => q.status !== 'FAILED');
+    db.saveSyncQueue(queue);
+  }
+
+  public static async simulateServerSync(): Promise<{
+    success: boolean;
+    syncedCount: number;
+  }> {
     if (SyncService.isSimulatingSync) {
       return { success: false, syncedCount: 0 };
     }
@@ -285,7 +478,11 @@ export class SyncService {
                 : cloudUser.assigned_shop_ids;
           }
         } catch (e) {
-          console.warn('Failed to parse assigned_shop_ids for user:', cloudUser.id, e);
+          console.warn(
+            'Failed to parse assigned_shop_ids for user:',
+            cloudUser.id,
+            e
+          );
           parsedShopIds = [];
         }
 
@@ -420,7 +617,6 @@ export class SyncService {
             quantity: item.quantity,
             discount: item.discount,
             total: item.total,
-            // 🆕 Reference price snapshot from cloud (nullable for legacy rows)
             referencePrice: item.reference_price ?? undefined,
             referenceType: item.reference_type ?? undefined,
           }));
@@ -624,8 +820,8 @@ export class SyncService {
       cloudData.saleEditRequests.forEach((cloudRequest: any) => {
         const index = mergedRequests.findIndex(r => r.id === cloudRequest.id);
 
-        let parsedOriginalValues = {};
-        let parsedNewValues = {};
+        let parsedOriginalValues: any = {};
+        let parsedNewValues: any = {};
 
         try {
           parsedOriginalValues =
@@ -645,7 +841,7 @@ export class SyncService {
           console.warn('Failed to parse new_values:', e);
         }
 
-        const requestData = {
+        const requestData: SaleEditRequest = {
           id: cloudRequest.id,
           saleId: cloudRequest.sale_id,
           requestedByUserId: cloudRequest.requested_by_user_id,
@@ -678,10 +874,14 @@ export class SyncService {
 
       if (cloudData.settings.business_name)
         mergedSettings.businessName = cloudData.settings.business_name;
-      if (cloudData.settings.tagline) mergedSettings.tagline = cloudData.settings.tagline;
-      if (cloudData.settings.address) mergedSettings.address = cloudData.settings.address;
-      if (cloudData.settings.phone) mergedSettings.phone = cloudData.settings.phone;
-      if (cloudData.settings.email) mergedSettings.email = cloudData.settings.email;
+      if (cloudData.settings.tagline)
+        mergedSettings.tagline = cloudData.settings.tagline;
+      if (cloudData.settings.address)
+        mergedSettings.address = cloudData.settings.address;
+      if (cloudData.settings.phone)
+        mergedSettings.phone = cloudData.settings.phone;
+      if (cloudData.settings.email)
+        mergedSettings.email = cloudData.settings.email;
       if (cloudData.settings.currency_symbol)
         mergedSettings.currencySymbol = cloudData.settings.currency_symbol;
       if (cloudData.settings.currency_code)
@@ -691,9 +891,11 @@ export class SyncService {
       if (cloudData.settings.enable_tax !== undefined)
         mergedSettings.enableTax = !!cloudData.settings.enable_tax;
       if (cloudData.settings.receipt_header_note)
-        mergedSettings.receiptHeaderNote = cloudData.settings.receipt_header_note;
+        mergedSettings.receiptHeaderNote =
+          cloudData.settings.receipt_header_note;
       if (cloudData.settings.receipt_footer_note)
-        mergedSettings.receiptFooterNote = cloudData.settings.receipt_footer_note;
+        mergedSettings.receiptFooterNote =
+          cloudData.settings.receipt_footer_note;
 
       db.saveSettings(mergedSettings);
     }

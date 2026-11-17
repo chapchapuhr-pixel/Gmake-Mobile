@@ -103,10 +103,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const pushPendingItems = async () => {
     if (isPushingRef.current || isSyncingRef.current) return;
 
-    const queue = db.getSyncQueue();
-    const pendingItems = queue.filter(item => item.status === 'PENDING');
-
-    if (pendingItems.length === 0) return;
+    const pendingCount = SyncService.getPendingCount();
+    if (pendingCount === 0) return;
 
     isPushingRef.current = true;
     isSyncingRef.current = true;
@@ -115,36 +113,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const online = await CloudflareApi.checkConnection();
 
       if (online) {
-        console.log(`[Sync] Pushing ${pendingItems.length} items to cloud...`);
+        console.log(`[Sync] Pushing ${pendingCount} items to cloud...`);
 
-        const operations = pendingItems.map(item => ({
-          id: item.id,
-          operation: item.operation || item.action,
-          entityType: item.entityType,
-          entityId: item.entityId,
-          payload: item.payload,
-        }));
+        const pushResult = await SyncService.pushPendingOnly();
 
-        const pushResult = await CloudflareApi.pushSync(operations);
+        const state = db.getState();
+        setDbState({ ...state });
+        setSyncStatus(SyncService.getSyncStatus());
 
         if (pushResult.success) {
-          const updatedQueue = queue.map(item => {
-            if (item.status === 'PENDING') {
-              return { ...item, status: 'SYNCED' as const };
-            }
-            return item;
-          });
-          db.saveSyncQueue(updatedQueue);
-
-          localStorage.setItem('omnibiz_last_synced_at', new Date().toISOString());
-
-          const state = db.getState();
-          setDbState({ ...state });
-          setSyncStatus(SyncService.getSyncStatus());
-
-          console.log(`[Sync] Successfully pushed ${pendingItems.length} items`);
+          console.log(`[Sync] Successfully pushed ${pushResult.processedCount} items`);
         } else {
-          console.log('[Sync] Push failed:', pushResult);
+          console.warn('[Sync] Push finished with errors:', pushResult.errors);
         }
       } else {
         console.log('[Sync] Offline - will retry later');

@@ -361,7 +361,9 @@ async function upsertStore(db: any, store: any) {
 
 async function upsertProduct(db: any, product: any) {
   const currentStock = product.storeId ? 0 : product.currentStock || 0;
-  const storeStock = product.storeId ? product.currentStock || 0 : 0;
+  const storeStock = product.storeId
+    ? product.storeStock ?? product.currentStock ?? 0
+    : product.storeStock ?? 0;
 
   await db
     .prepare(

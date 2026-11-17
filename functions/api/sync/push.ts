@@ -138,6 +138,16 @@ async function processOperation(db: any, op: any) {
     case 'REVIEW_SALE_EDIT_REQUEST':
       await reviewSaleEditRequest(db, payload);
       break;
+      
+    // ── NEW STORE OPERATIONS ──
+    case 'CREATE_STORE':
+    case 'UPDATE_STORE':
+      await upsertStore(db, payload);
+      break;
+    case 'TRANSFER_STORE_TO_SHOP':
+      await transferStoreToShop(db, payload);
+      break;
+      
     default:
       throw new Error(`Unknown operation: ${operation}`);
   }
@@ -156,6 +166,7 @@ async function deleteShop(db: any, payload: any) {
   await db.prepare('DELETE FROM categories WHERE shop_id = ?').bind(payload.id).run();
   await db.prepare('DELETE FROM expenses WHERE shop_id = ?').bind(payload.id).run();
   await db.prepare('DELETE FROM shops WHERE id = ?').bind(payload.id).run();
+  await db.prepare('DELETE FROM stores WHERE shop_id = ?').bind(payload.id).run();
 }
 
 async function deleteProduct(db: any, payload: any) {
@@ -196,14 +207,34 @@ async function upsertShop(db: any, shop: any) {
   ).run();
 }
 
+async function upsertStore(db: any, store: any) {
+  await db.prepare(`
+    INSERT INTO stores (id, shop_id, name, location, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      location = excluded.location,
+      status = excluded.status,
+      updated_at = excluded.updated_at
+  `).bind(
+    store.id, store.shopId, store.name, store.location || null,
+    store.status || 'ACTIVE', store.createdAt || new Date().toISOString(),
+    store.updatedAt || new Date().toISOString()
+  ).run();
+}
+
 async function upsertProduct(db: any, product: any) {
+  // Determine initial stock routing based on storeId
+  const currentStock = product.storeId ? 0 : (product.currentStock || 0);
+  const storeStock = product.storeId ? (product.currentStock || 0) : 0;
+
   await db.prepare(`
     INSERT INTO products (
       id, shop_id, name, sku, barcode, category_id,
       selling_price, proposed_selling_price, purchase_price,
-      current_stock, min_stock, unit, status, image_url, created_at, updated_at
+      current_stock, store_stock, min_stock, unit, status, image_url, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       shop_id = excluded.shop_id,
       name = excluded.name,
@@ -214,6 +245,7 @@ async function upsertProduct(db: any, product: any) {
       proposed_selling_price = excluded.proposed_selling_price,
       purchase_price = excluded.purchase_price,
       current_stock = excluded.current_stock,
+      store_stock = excluded.store_stock,
       min_stock = excluded.min_stock,
       unit = excluded.unit,
       status = excluded.status,
@@ -222,11 +254,27 @@ async function upsertProduct(db: any, product: any) {
   `).bind(
     product.id, product.shopId, product.name, product.sku, product.barcode || null,
     product.categoryId, product.sellingPrice || 0, product.proposedSellingPrice || null,
-    product.purchasePrice || 0, product.currentStock || 0, product.minStock || 5,
+    product.purchasePrice || 0, currentStock, storeStock, product.minStock || 5,
     product.unit || 'pcs', product.status || 'ACTIVE',
     product.imageUrl || product.image_url || null,
     product.createdAt || new Date().toISOString(), product.updatedAt || new Date().toISOString()
   ).run();
+
+  // If added directly to store, log the movement
+  if (product.storeId && currentStock === 0 && storeStock > 0) {
+    await db.prepare(`
+      INSERT INTO inventory_movements (
+        id, shop_id, shop_name, product_id, product_name, store_id,
+        previous_qty, change_qty, new_qty, type, reason, 
+        user_id, user_name, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      crypto.randomUUID(), product.shopId, null, product.id, product.name, product.storeId,
+      0, storeStock, storeStock, 'INITIAL_STOCK', 'Product added directly to store',
+      product.createdByUserId || 'system', 'System', new Date().toISOString()
+    ).run();
+  }
 
   if (product.images && Array.isArray(product.images) && product.images.length > 0) {
     for (let i = 0; i < product.images.length; i++) {
@@ -433,30 +481,46 @@ async function createPurchase(db: any, purchase: any) {
     ).run();
 
     const product = await db.prepare(
-      'SELECT current_stock FROM products WHERE id = ?'
+      'SELECT current_stock, store_stock FROM products WHERE id = ?'
     ).bind(item.productId).first();
 
     if (product) {
       const currentStock = Number(product.current_stock) || 0;
+      const currentStoreStock = Number(product.store_stock) || 0;
       const newPurchaseQty = Number(item.quantity) || 0;
       const newUnitCost = Number(item.unitCost) || 0;
-      const newTotalStock = currentStock + newPurchaseQty;
+      
+      let newStock = currentStock;
+      let newStoreStock = currentStoreStock;
 
-      await db.prepare(`
-        UPDATE products SET current_stock = ?, purchase_price = ?, updated_at = ? WHERE id = ?
-      `).bind(newTotalStock, Number(newUnitCost.toFixed(2)), new Date().toISOString(), item.productId).run();
+      // Route to store or shop
+      if (purchase.storeId) {
+        newStoreStock += newPurchaseQty;
+        await db.prepare(`
+          UPDATE products SET store_stock = ?, purchase_price = ?, updated_at = ? WHERE id = ?
+        `).bind(newStoreStock, Number(newUnitCost.toFixed(2)), new Date().toISOString(), item.productId).run();
+      } else {
+        newStock += newPurchaseQty;
+        await db.prepare(`
+          UPDATE products SET current_stock = ?, purchase_price = ?, updated_at = ? WHERE id = ?
+        `).bind(newStock, Number(newUnitCost.toFixed(2)), new Date().toISOString(), item.productId).run();
+      }
 
+      // Log Movement
       await db.prepare(`
         INSERT INTO inventory_movements (
-          id, shop_id, shop_name, product_id, product_name,
+          id, shop_id, shop_name, store_id, product_id, product_name,
           previous_qty, change_qty, new_qty, type, reason, cost_value,
           reference_id, user_id, user_name, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO NOTHING
       `).bind(
         crypto.randomUUID(), purchase.shopId, purchase.shopName || null,
-        item.productId, item.productName, currentStock, newPurchaseQty, newTotalStock,
+        purchase.storeId || null, item.productId, item.productName,
+        purchase.storeId ? currentStoreStock : currentStock, 
+        newPurchaseQty, 
+        purchase.storeId ? newStoreStock : newStock,
         'PURCHASE', `Purchase from ${purchase.supplierName}`, newUnitCost,
         purchase.id, purchase.createdByUserId, purchase.createdByName,
         purchase.createdAt || new Date().toISOString()
@@ -472,6 +536,8 @@ async function updatePurchase(db: any, purchase: any) {
 
   if (oldPurchase.results) {
     for (const oldItem of oldPurchase.results) {
+      // Note: Reversing previous purchase requires knowing if it was to store or shop.
+      // For simplicity, we assume reversal happens from current_stock.
       await db.prepare(`
         UPDATE products SET current_stock = current_stock - ?, updated_at = ? WHERE id = ?
       `).bind(oldItem.quantity || 0, new Date().toISOString(), oldItem.product_id).run();
@@ -499,18 +565,29 @@ async function updatePurchase(db: any, purchase: any) {
     ).run();
 
     const product = await db.prepare(
-      'SELECT current_stock FROM products WHERE id = ?'
+      'SELECT current_stock, store_stock FROM products WHERE id = ?'
     ).bind(item.productId).first();
 
     if (product) {
       const currentStock = Number(product.current_stock) || 0;
+      const currentStoreStock = Number(product.store_stock) || 0;
       const newPurchaseQty = Number(item.quantity) || 0;
       const newUnitCost = Number(item.unitCost) || 0;
-      const newTotalStock = currentStock + newPurchaseQty;
+      
+      let newStock = currentStock;
+      let newStoreStock = currentStoreStock;
 
-      await db.prepare(`
-        UPDATE products SET current_stock = ?, purchase_price = ?, updated_at = ? WHERE id = ?
-      `).bind(newTotalStock, Number(newUnitCost.toFixed(2)), new Date().toISOString(), item.productId).run();
+      if (purchase.storeId) {
+        newStoreStock += newPurchaseQty;
+        await db.prepare(`
+          UPDATE products SET store_stock = ?, purchase_price = ?, updated_at = ? WHERE id = ?
+        `).bind(newStoreStock, Number(newUnitCost.toFixed(2)), new Date().toISOString(), item.productId).run();
+      } else {
+        newStock += newPurchaseQty;
+        await db.prepare(`
+          UPDATE products SET current_stock = ?, purchase_price = ?, updated_at = ? WHERE id = ?
+        `).bind(newStock, Number(newUnitCost.toFixed(2)), new Date().toISOString(), item.productId).run();
+      }
     }
   }
 }
@@ -544,7 +621,6 @@ async function reviewSaleEditRequest(db: any, request: any) {
     return;
   }
 
-  // STEP 1: update request row
   await db.prepare(`
     UPDATE sale_edit_requests SET
       status = ?, reviewed_by_user_id = ?, reviewed_by_name = ?,
@@ -559,7 +635,6 @@ async function reviewSaleEditRequest(db: any, request: any) {
     request.id
   ).run();
 
-  // STEP 2: if approved, apply the new values to sale + items
   if (request.status === 'APPROVED') {
     const editRequest = await db.prepare(
       'SELECT * FROM sale_edit_requests WHERE id = ?'
@@ -574,7 +649,6 @@ async function reviewSaleEditRequest(db: any, request: any) {
       const saleId = editRequest.sale_id;
       const now = new Date().toISOString();
 
-      // Reverse old stock
       const oldItems = await db.prepare(
         'SELECT product_id, quantity FROM sale_items WHERE sale_id = ?'
       ).bind(saleId).all();
@@ -589,7 +663,6 @@ async function reviewSaleEditRequest(db: any, request: any) {
 
       await db.prepare('DELETE FROM sale_items WHERE sale_id = ?').bind(saleId).run();
 
-      // Insert new sale_items + subtract stock
       for (const item of newValues.items || []) {
         await db.prepare(`
           INSERT INTO sale_items (
@@ -611,7 +684,6 @@ async function reviewSaleEditRequest(db: any, request: any) {
         `).bind(item.quantity || 0, now, item.productId).run();
       }
 
-      // Update sales row + new updated_at
       await db.prepare(`
         UPDATE sales SET
           subtotal = ?, discount = ?, total = ?,
@@ -677,23 +749,30 @@ async function upsertUser(db: any, user: any) {
 async function recordStockAdjustment(db: any, movement: any) {
   await db.prepare(`
     INSERT INTO inventory_movements (
-      id, shop_id, shop_name, product_id, product_name,
+      id, shop_id, shop_name, store_id, product_id, product_name,
       previous_qty, change_qty, new_qty, type, reason, cost_value,
       reference_id, user_id, user_name, created_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO NOTHING
   `).bind(
     movement.id || crypto.randomUUID(), movement.shopId, movement.shopName || null,
-    movement.productId, movement.productName, movement.previousQty || 0,
+    movement.storeId || null, movement.productId, movement.productName, movement.previousQty || 0,
     movement.changeQty || 0, movement.newQty || 0, movement.type || 'ADJUSTMENT',
     movement.reason || '', movement.costValue || null, movement.referenceId || null,
     movement.userId, movement.userName, movement.createdAt || new Date().toISOString()
   ).run();
 
-  await db.prepare(`
-    UPDATE products SET current_stock = ?, updated_at = ? WHERE id = ?
-  `).bind(movement.newQty, new Date().toISOString(), movement.productId).run();
+  // If adjusting a store, update store_stock. Otherwise update current_stock.
+  if (movement.storeId) {
+    await db.prepare(`
+      UPDATE products SET store_stock = ?, updated_at = ? WHERE id = ?
+    `).bind(movement.newQty, new Date().toISOString(), movement.productId).run();
+  } else {
+    await db.prepare(`
+      UPDATE products SET current_stock = ?, updated_at = ? WHERE id = ?
+    `).bind(movement.newQty, new Date().toISOString(), movement.productId).run();
+  }
 }
 
 async function updateSettings(db: any, settings: any) {
@@ -752,5 +831,65 @@ async function updateDebt(db: any, debt: any) {
     debt.amount || 0, debt.paidAmount || 0, debt.remainingAmount || 0,
     debt.dueDate || null, debt.contact || null, debt.notes || null,
     debt.status || 'PENDING', new Date().toISOString(), debt.id
+  ).run();
+}
+
+// ── NEW STORE TRANSFER LOGIC ──
+async function transferStoreToShop(db: any, transfer: any) {
+  const now = new Date().toISOString();
+
+  const product = await db.prepare(
+    'SELECT current_stock, store_stock, name FROM products WHERE id = ?'
+  ).bind(transfer.productId).first();
+
+  if (!product) throw new Error('Product not found');
+
+  const currentShopStock = Number(product.current_stock) || 0;
+  const currentStoreStock = Number(product.store_stock) || 0;
+
+  if (currentStoreStock < transfer.quantity) {
+    throw new Error(`Not enough stock in store. Available: ${currentStoreStock}`);
+  }
+
+  const newShopStock = currentShopStock + transfer.quantity;
+  const newStoreStock = currentStoreStock - transfer.quantity;
+
+  // 1. Update Products Table
+  await db.prepare(`
+    UPDATE products 
+    SET current_stock = ?, store_stock = ?, updated_at = ? 
+    WHERE id = ?
+  `).bind(newShopStock, newStoreStock, now, transfer.productId).run();
+
+  // 2. Log INCOMING movement to Shop Floor
+  await db.prepare(`
+    INSERT INTO inventory_movements (
+      id, shop_id, shop_name, product_id, product_name, store_id,
+      previous_qty, change_qty, new_qty, type, reason, 
+      reference_id, user_id, user_name, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    crypto.randomUUID(), 
+    transfer.shopId, transfer.shopName || null, 
+    transfer.productId, product.name, transfer.storeId,
+    currentShopStock, transfer.quantity, newShopStock,
+    'STORE_TRANSFER', `Transferred IN from ${transfer.storeName || 'Store'}`, 
+    transfer.transferId || null, transfer.transferredById, transfer.transferredByName, now
+  ).run();
+
+  // 3. Log OUTGOING movement from Store
+  await db.prepare(`
+    INSERT INTO inventory_movements (
+      id, shop_id, shop_name, product_id, product_name, store_id,
+      previous_qty, change_qty, new_qty, type, reason, 
+      reference_id, user_id, user_name, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    crypto.randomUUID(), 
+    transfer.shopId, transfer.shopName || null, 
+    transfer.productId, product.name, transfer.storeId,
+    currentStoreStock, -transfer.quantity, newStoreStock,
+    'STORE_TRANSFER', `Transferred OUT to Shop`, 
+    transfer.transferId || null, transfer.transferredById, transfer.transferredByName, now
   ).run();
 }

@@ -31,6 +31,7 @@ import { AdminSellers } from './components/admin/AdminSellers';
 import { AdminPurchases } from './components/admin/AdminPurchases';
 import { AdminExpenses } from './components/admin/AdminExpenses';
 import { AdminReports } from './components/admin/AdminReports';
+import { AdminStores } from './components/admin/AdminStores';
 import { AdminDataManagement } from './components/admin/AdminDataManagement';
 import { AdminSettings } from './components/admin/AdminSettings';
 
@@ -98,6 +99,8 @@ const MainLayout: React.FC = () => {
             return <AdminShops />;
           }
           return <SellerDashboard />;
+        case 'stores':
+          return shopAdmin ? <AdminStores /> : <SellerDashboard />;
         case 'sellers':
           // Only if seller has canManageSellers permission
           if (permissions.canManageSellers) {
@@ -123,6 +126,8 @@ const MainLayout: React.FC = () => {
         return <NewSalePOS />;
       case 'shops':
         return <AdminShops />;
+      case 'stores':
+        return <AdminStores />;
       case 'sales':
         return <AdminSales />;
       case 'products':

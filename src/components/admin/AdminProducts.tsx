@@ -66,6 +66,8 @@ export const AdminProducts: React.FC = () => {
   const [minStock, setMinStock] = useState('5');
   const [unit, setUnit] = useState('pcs');
   const [productImages, setProductImages] = useState<ProductImage[]>([]);
+  const [destinationType, setDestinationType] = useState<'SHOP_FLOOR' | 'STORE'>('SHOP_FLOOR');
+  const [selectedStoreId, setSelectedStoreId] = useState('');
   const [formError, setFormError] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
@@ -199,6 +201,11 @@ export const AdminProducts: React.FC = () => {
     setMinStock('5');
     setUnit('pcs');
     setProductImages([]);
+    setDestinationType('SHOP_FLOOR');
+    const shopStores = (dbState.stores || []).filter(
+      st => st.shopId === initialShopId && st.status === 'ACTIVE'
+    );
+    setSelectedStoreId(shopStores[0]?.id || '');
     setFormError('');
     setIsModalOpen(true);
   };
@@ -217,6 +224,8 @@ export const AdminProducts: React.FC = () => {
     setMinStock(p.minStock.toString());
     setUnit(p.unit);
     setProductImages(p.images || []);
+    setDestinationType('SHOP_FLOOR');
+    setSelectedStoreId('');
     setFormError('');
     setIsModalOpen(true);
   };
@@ -227,6 +236,10 @@ export const AdminProducts: React.FC = () => {
     if (shopCats.length > 0 && !shopCats.some(c => c.id === categoryId)) {
       setCategoryId(shopCats[0].id);
     }
+    const shopStores = (dbState.stores || []).filter(
+      st => st.shopId === newShopId && st.status === 'ACTIVE'
+    );
+    setSelectedStoreId(shopStores[0]?.id || '');
   };
 
   const handleSaveProduct = async (e: React.FormEvent) => {
@@ -277,9 +290,15 @@ export const AdminProducts: React.FC = () => {
           currentUser
         );
       } else {
+        if (destinationType === 'STORE' && !selectedStoreId) {
+          setFormError('Please select a destination store or switch to Direct to Shop Floor.');
+          setIsSaving(false);
+          return;
+        }
         result = await ProductService.createProduct(
           {
             shopId: productShopId,
+            storeId: destinationType === 'STORE' ? selectedStoreId : undefined,
             name,
             sku: sku.trim() || undefined,
             barcode: barcode.trim() || undefined,
@@ -506,9 +525,11 @@ export const AdminProducts: React.FC = () => {
             </div>
           </div>
           <div className="bg-slate-950/60 p-1.5 rounded-lg border border-slate-800">
-            <div className="text-[9px] text-slate-400">Stock</div>
+            <div className="text-[9px] text-slate-400">
+              {(product.storeStock || 0) > 0 ? 'Floor / Store' : 'Stock'}
+            </div>
             <div
-              className={`font-mono text-[11px] font-bold ${
+              className={`font-mono text-[11px] font-bold tabular-nums ${
                 product.currentStock <= 0
                   ? 'text-rose-400'
                   : isLow
@@ -518,6 +539,11 @@ export const AdminProducts: React.FC = () => {
             >
               {product.currentStock} {product.unit}
             </div>
+            {(product.storeStock || 0) > 0 && (
+              <div className="font-mono text-[10px] text-blue-400 tabular-nums mt-0.5">
+                Store: {product.storeStock} {product.unit}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1206,10 +1232,83 @@ export const AdminProducts: React.FC = () => {
                 </div>
               </div>
 
+              {!editingProduct && (() => {
+                const activeShopStores = (dbState.stores || []).filter(
+                  st => st.shopId === productShopId && st.status === 'ACTIVE'
+                );
+                return (
+                  <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                    <label className="block text-slate-300 font-medium">
+                      Stock Destination *
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDestinationType('SHOP_FLOOR')}
+                        className={`px-3 py-2 rounded-lg border text-left font-semibold transition ${
+                          destinationType === 'SHOP_FLOOR'
+                            ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Direct to Shop Floor
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDestinationType('STORE');
+                          if (!selectedStoreId && activeShopStores.length > 0) {
+                            setSelectedStoreId(activeShopStores[0].id);
+                          }
+                        }}
+                        className={`px-3 py-2 rounded-lg border text-left font-semibold transition ${
+                          destinationType === 'STORE'
+                            ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Send to Store (Warehouse)
+                      </button>
+                    </div>
+
+                    {destinationType === 'STORE' && (
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">
+                          Select Store (Warehouse) *
+                        </label>
+                        {activeShopStores.length > 0 ? (
+                          <select
+                            value={selectedStoreId}
+                            onChange={e => setSelectedStoreId(e.target.value)}
+                            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          >
+                            <option value="">Select destination store...</option>
+                            {activeShopStores.map(st => (
+                              <option key={st.id} value={st.id}>
+                                {st.name}
+                                {st.location ? ` — ${st.location}` : ''}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <p className="text-[11px] text-amber-400 py-1">
+                            No active stores exist for this shop yet. Create one in Stores &amp; Transfers or choose Direct to Shop Floor.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-slate-300 font-medium mb-1">
-                    {editingProduct ? 'Current Stock' : 'Initial Stock'}
+                    {editingProduct
+                      ? 'Current Floor Stock'
+                      : destinationType === 'STORE'
+                        ? 'Initial Store Stock'
+                        : 'Initial Shop Floor Stock'}
                   </label>
                   <input
                     type="number"

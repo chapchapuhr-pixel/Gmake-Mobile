@@ -43,6 +43,8 @@ export const SellerProducts: React.FC = () => {
   const [minStock, setMinStock] = useState('5');
   const [unit, setUnit] = useState('pcs');
   const [productImages, setProductImages] = useState<ProductImage[]>([]);
+  const [destinationType, setDestinationType] = useState<'SHOP_FLOOR' | 'STORE'>('SHOP_FLOOR');
+  const [selectedStoreId, setSelectedStoreId] = useState('');
   const [formError, setFormError] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
@@ -115,10 +117,17 @@ export const SellerProducts: React.FC = () => {
 
     const firstActiveCat = shopCategories.find(c => c.status !== 'INACTIVE');
 
+    if (destinationType === 'STORE' && !selectedStoreId) {
+      setFormError('Please select a destination store or switch to Direct to Shop Floor.');
+      setIsSaving(false);
+      return;
+    }
+
     try {
       const result = await ProductService.createProduct(
         {
           shopId: targetShopId,
+          storeId: destinationType === 'STORE' ? selectedStoreId : undefined,
           name,
           sku: sku.trim() || undefined,
           barcode: barcode.trim() || undefined,
@@ -153,6 +162,8 @@ export const SellerProducts: React.FC = () => {
         setCurrentStock('0');
         setMinStock('5');
         setProductImages([]);
+        setDestinationType('SHOP_FLOOR');
+        setSelectedStoreId('');
       } else {
         setFormError(result.error || 'Failed to create product.');
       }
@@ -183,6 +194,12 @@ export const SellerProducts: React.FC = () => {
           id="seller-add-product-btn"
           onClick={() => {
             setCategoryId(shopCategories[0]?.id || '');
+            setDestinationType('SHOP_FLOOR');
+            const shopStores = (dbState.stores || []).filter(
+              st => st.shopId === targetShopId && st.status === 'ACTIVE'
+            );
+            setSelectedStoreId(shopStores[0]?.id || '');
+            setFormError('');
             setShowAddModal(true);
           }}
           className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-xs text-white shadow-lg transition-all active:scale-95"
@@ -272,7 +289,7 @@ export const SellerProducts: React.FC = () => {
                     </div>
 
                     <div className="flex items-center justify-between pt-1.5 border-t border-slate-800/50 text-xs">
-                      <div>
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span
                           className={`font-mono font-bold px-2 py-0.5 rounded text-[10px] ${
                             product.currentStock <= 0
@@ -282,8 +299,13 @@ export const SellerProducts: React.FC = () => {
                               : 'bg-emerald-500/15 text-emerald-300'
                           }`}
                         >
-                          Stock: {product.currentStock} {product.unit}
+                          Floor: {product.currentStock} {product.unit}
                         </span>
+                        {(product.storeStock || 0) > 0 && (
+                          <span className="font-mono text-[10px] text-blue-400">
+                            · Store: {product.storeStock} {product.unit}
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2">
@@ -359,6 +381,11 @@ export const SellerProducts: React.FC = () => {
                           >
                             {product.currentStock} {product.unit}
                           </span>
+                          {(product.storeStock || 0) > 0 && (
+                            <div className="font-mono text-[10px] text-blue-400 mt-0.5">
+                              Store: {product.storeStock} {product.unit}
+                            </div>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-slate-400">{product.unit}</td>
                         <td className="py-3 px-4 text-right font-mono font-bold text-emerald-400 text-sm">
@@ -563,10 +590,81 @@ export const SellerProducts: React.FC = () => {
                 </div>
               </div>
 
+              {(() => {
+                const activeShopStores = (dbState.stores || []).filter(
+                  st => st.shopId === targetShopId && st.status === 'ACTIVE'
+                );
+                return (
+                  <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                    <label className="block text-slate-300 font-medium">
+                      Stock Destination *
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDestinationType('SHOP_FLOOR')}
+                        className={`px-3 py-2 rounded-lg border text-left font-semibold transition ${
+                          destinationType === 'SHOP_FLOOR'
+                            ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Direct to Shop Floor
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDestinationType('STORE');
+                          if (!selectedStoreId && activeShopStores.length > 0) {
+                            setSelectedStoreId(activeShopStores[0].id);
+                          }
+                        }}
+                        className={`px-3 py-2 rounded-lg border text-left font-semibold transition ${
+                          destinationType === 'STORE'
+                            ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Send to Store (Warehouse)
+                      </button>
+                    </div>
+
+                    {destinationType === 'STORE' && (
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">
+                          Select Store (Warehouse) *
+                        </label>
+                        {activeShopStores.length > 0 ? (
+                          <select
+                            value={selectedStoreId}
+                            onChange={e => setSelectedStoreId(e.target.value)}
+                            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          >
+                            <option value="">Select destination store...</option>
+                            {activeShopStores.map(st => (
+                              <option key={st.id} value={st.id}>
+                                {st.name}
+                                {st.location ? ` — ${st.location}` : ''}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <p className="text-[11px] text-amber-400 py-1">
+                            No active stores exist for this shop yet.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               <div className="grid grid-cols-2 gap-2.5 sm:gap-3">
                 <div>
                   <label className="block text-slate-300 font-medium mb-1">
-                    Initial Stock (Defaults to 0)
+                    {destinationType === 'STORE'
+                      ? 'Initial Store Stock'
+                      : 'Initial Shop Floor Stock'}
                   </label>
                   <input
                     type="number"

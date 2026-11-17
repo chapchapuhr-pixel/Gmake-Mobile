@@ -228,6 +228,33 @@ export class SyncService {
       db.saveShops(merged);
     }
 
+    // Apply stores (warehouses)
+    if (cloudData.stores && cloudData.stores.length > 0) {
+      const localStores = db.getStores();
+      const mergedStores = [...localStores];
+
+      cloudData.stores.forEach((cloudStore: any) => {
+        const index = mergedStores.findIndex(s => s.id === cloudStore.id);
+        const storeData = {
+          id: cloudStore.id,
+          shopId: cloudStore.shop_id || cloudStore.shopId,
+          name: cloudStore.name,
+          location: cloudStore.location || undefined,
+          status: cloudStore.status || 'ACTIVE',
+          createdAt: cloudStore.created_at || cloudStore.createdAt,
+          updatedAt: cloudStore.updated_at || cloudStore.updatedAt,
+        };
+
+        if (index === -1) {
+          mergedStores.push(storeData);
+        } else {
+          mergedStores[index] = { ...mergedStores[index], ...storeData };
+        }
+      });
+
+      db.saveStores(mergedStores);
+    }
+
     // Apply users
     if (cloudData.users && cloudData.users.length > 0) {
       const localUsers = db.getUsers();
@@ -350,7 +377,8 @@ export class SyncService {
           sellingPrice: cloudProduct.selling_price,
           proposedSellingPrice: cloudProduct.proposed_selling_price,
           purchasePrice: cloudProduct.purchase_price,
-          currentStock: cloudProduct.current_stock,
+          currentStock: cloudProduct.current_stock ?? 0,
+          storeStock: cloudProduct.store_stock ?? 0,
           minStock: cloudProduct.min_stock,
           unit: cloudProduct.unit,
           status: cloudProduct.status,
@@ -453,6 +481,7 @@ export class SyncService {
           purchaseNumber: cloudPurchase.purchase_number,
           shopId: cloudPurchase.shop_id,
           shopName: cloudPurchase.shop_name,
+          storeId: cloudPurchase.store_id || undefined,
           supplierName: cloudPurchase.supplier_name,
           date: cloudPurchase.date,
           totalAmount: cloudPurchase.total_amount,
@@ -562,6 +591,7 @@ export class SyncService {
           id: cloudMovement.id,
           shopId: cloudMovement.shop_id,
           shopName: cloudMovement.shop_name,
+          storeId: cloudMovement.store_id || undefined,
           productId: cloudMovement.product_id,
           productName: cloudMovement.product_name,
           previousQty: cloudMovement.previous_qty,

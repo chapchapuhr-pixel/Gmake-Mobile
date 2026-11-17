@@ -24,6 +24,7 @@ import {
   CheckCircle2,
   AlertCircle,
   ChevronRight,
+  Warehouse,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { NotificationService } from '../../services/notificationService';
@@ -180,6 +181,17 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
     { id: 'shops', swahiliLabel: 'Maduka na Vitengo', englishLabel: 'Shops & Business Units', icon: Store, badge: managedShops.length, category: 'core' },
     { id: 'sales', swahiliLabel: 'Mauzo', englishLabel: 'Sales Transactions', icon: History, category: 'operations' },
     { id: 'products', swahiliLabel: 'Bidhaa na Makundi', englishLabel: 'Products & Categories', icon: Package, category: 'operations' },
+    {
+      id: 'stores',
+      swahiliLabel: 'Stoo Kuu na Uhamisho',
+      englishLabel: 'Stores & Transfers',
+      icon: Warehouse,
+      badge: (dbState.stores || []).filter(
+        st => isPlatformAdm || managedShopIds.includes(st.shopId)
+      ).length || undefined,
+      badgeColor: 'blue',
+      category: 'operations',
+    },
     { id: 'inventory', swahiliLabel: 'Stoo na Hesabu', englishLabel: 'Stock & Inventory', icon: Boxes, badge: lowStockCount > 0 ? `${lowStockCount} Low` : undefined, category: 'operations' },
     { id: 'purchases', swahiliLabel: 'Manunuzi ya Mzigo', englishLabel: 'Purchases & Stock-In', icon: Truck, category: 'operations' },
     { id: 'expenses', swahiliLabel: 'Matumizi ya Uendeshaji', englishLabel: 'Operational Expenses', icon: TrendingDown, category: 'operations' },

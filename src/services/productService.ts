@@ -134,6 +134,7 @@ export class ProductService {
   public static async createProduct(
     data: {
       shopId: string;
+      storeId?: string;
       name: string;
       sku?: string;
       barcode?: string;
@@ -183,6 +184,21 @@ export class ProductService {
       return { success: false, error: 'Selected shop does not exist.' };
     }
 
+    const targetStore = data.storeId
+      ? db.getStores().find(st => st.id === data.storeId)
+      : undefined;
+    if (data.storeId) {
+      if (!targetStore) {
+        return { success: false, error: 'Selected destination store does not exist.' };
+      }
+      if (targetStore.shopId !== data.shopId) {
+        return { success: false, error: 'Selected store does not belong to this shop.' };
+      }
+      if (targetStore.status !== 'ACTIVE') {
+        return { success: false, error: `Store '${targetStore.name}' is inactive.` };
+      }
+    }
+
     if (data.sellingPrice === undefined || data.sellingPrice < 0) {
       return { success: false, error: 'Valid selling price is required.' };
     }
@@ -218,16 +234,21 @@ export class ProductService {
         ? normalizedImages[0].thumbnailUrl || normalizedImages[0].dataUrl
         : data.imageUrl;
 
+    const initialQty = Math.max(0, Number(data.currentStock || 0));
+    const isSentToStore = Boolean(data.storeId && targetStore);
+
     const newProduct: Product = {
       id: productId,
       shopId: data.shopId,
+      storeId: isSentToStore ? data.storeId : undefined,
       name: data.name.trim(),
       sku: cleanSku,
       barcode: cleanBarcode,
       categoryId: data.categoryId || 'cat-supplies',
       sellingPrice: Number(data.sellingPrice),
       purchasePrice: Number(data.purchasePrice || 0),
-      currentStock: Number(data.currentStock || 0),
+      currentStock: isSentToStore ? 0 : initialQty,
+      storeStock: isSentToStore ? initialQty : 0,
       minStock: Number(data.minStock ?? 5),
       unit: data.unit?.trim() || 'pcs',
       status: data.status || 'ACTIVE',
@@ -240,20 +261,23 @@ export class ProductService {
     const updated = [newProduct, ...products];
     db.saveProducts(updated);
 
-    // If initial stock is greater than 0, record initial inventory movement with shopId
-    if (newProduct.currentStock > 0) {
+    // Record initial inventory movement (shop floor vs store warehouse)
+    if (initialQty > 0) {
       db.saveMovements([
         {
           id: generateUUID(),
           shopId: newProduct.shopId,
           shopName: shop.name,
+          storeId: isSentToStore ? data.storeId : undefined,
           productId: newProduct.id,
           productName: newProduct.name,
           previousQty: 0,
-          changeQty: newProduct.currentStock,
-          newQty: newProduct.currentStock,
-          type: 'ADJUSTMENT',
-          reason: `Initial stock opening in ${shop.name} by ${currentUser.name}`,
+          changeQty: initialQty,
+          newQty: initialQty,
+          type: isSentToStore ? 'INITIAL_STOCK' : 'ADJUSTMENT',
+          reason: isSentToStore
+            ? `Initial stock opening in store '${targetStore!.name}' [${shop.name}] by ${currentUser.name}`
+            : `Initial stock opening in ${shop.name} by ${currentUser.name}`,
           userId: currentUser.id,
           userName: currentUser.name,
           createdAt: new Date().toISOString(),
@@ -262,13 +286,20 @@ export class ProductService {
       ]);
     }
 
-    // Sync queue item
+    // Sync queue item — push.ts routes currentStock to store_stock when storeId is set
     db.enqueueSync({
       id: generateUUID(),
       operation: 'CREATE_PRODUCT',
       entityType: 'PRODUCT',
       entityId: newProduct.id,
-      payload: newProduct,
+      payload: isSentToStore
+        ? {
+            ...newProduct,
+            storeId: data.storeId,
+            currentStock: initialQty,
+            createdByUserId: currentUser.id,
+          }
+        : newProduct,
       status: 'PENDING',
       createdAt: new Date().toISOString(),
     });
@@ -279,7 +310,9 @@ export class ProductService {
       userId: currentUser.id,
       userName: currentUser.name,
       action: 'CREATE_PRODUCT',
-      details: `Created product '${newProduct.name}' in [${shop.name}] (SKU: ${newProduct.sku}, Stock: ${newProduct.currentStock})`,
+      details: isSentToStore
+        ? `Created product '${newProduct.name}' in [${shop.name}] -> Store '${targetStore!.name}' (SKU: ${newProduct.sku}, Store Stock: ${initialQty})`
+        : `Created product '${newProduct.name}' in [${shop.name}] (SKU: ${newProduct.sku}, Stock: ${newProduct.currentStock})`,
       entityType: 'PRODUCT',
       entityId: newProduct.id,
       timestamp: new Date().toISOString(),
@@ -357,6 +390,7 @@ export class ProductService {
     const updatedProduct: Product = {
       ...current,
       ...updates,
+      storeStock: updates.storeStock !== undefined ? updates.storeStock : (current.storeStock ?? 0),
       images: finalImages,
       imageUrl: finalImageUrl,
       updatedAt: new Date().toISOString(),

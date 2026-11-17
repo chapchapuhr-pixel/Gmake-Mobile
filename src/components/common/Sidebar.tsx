@@ -17,6 +17,7 @@ import {
   FileText,
   Bell,
   DollarSign,
+  Warehouse,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { NotificationService } from '../../services/notificationService';
@@ -173,6 +174,15 @@ export const Sidebar: React.FC = () => {
       badgeColor: 'red',
     },
     { id: 'products', label: 'Products & Categories', icon: Package },
+    {
+      id: 'stores',
+      label: 'Stores & Transfers',
+      icon: Warehouse,
+      badge: (dbState.stores || []).filter(
+        st => isPlatformAdm || managedShopIds.includes(st.shopId)
+      ).length || undefined,
+      badgeColor: 'blue',
+    },
     {
       id: 'inventory',
       label: 'Inventory',

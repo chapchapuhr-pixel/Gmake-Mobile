@@ -38,6 +38,7 @@ interface ProductLike {
   name: string;
   sku: string;
   currentStock: number;
+  storeStock?: number;
   unit: string;
   purchasePrice?: number;
   sellingPrice?: number;
@@ -111,7 +112,11 @@ const ProductSearchSelect: React.FC<{
                 {selectedProduct.name}
               </span>
               <span className="block text-[10px] text-slate-500 font-mono leading-tight mt-0.5">
-                {selectedProduct.sku} • Stock: {selectedProduct.currentStock} {selectedProduct.unit}
+                {selectedProduct.sku} · Floor: {selectedProduct.currentStock}
+                {(selectedProduct.storeStock || 0) > 0
+                  ? ` · Store: ${selectedProduct.storeStock}`
+                  : ''}{' '}
+                {selectedProduct.unit}
               </span>
             </span>
           ) : (
@@ -221,8 +226,13 @@ const ProductSearchSelect: React.FC<{
                                 p.currentStock <= 0 ? 'text-rose-400' : 'text-slate-500'
                               }
                             >
-                              Stock: {p.currentStock} {p.unit}
+                              Floor: {p.currentStock} {p.unit}
                             </span>
+                            {(p.storeStock || 0) > 0 && (
+                              <span className="text-blue-400">
+                                Store: {p.storeStock} {p.unit}
+                              </span>
+                            )}
                             {p.purchasePrice !== undefined && p.purchasePrice !== null && (
                               <span className="text-amber-400/80">
                                 Cost: {formatCurrency(p.purchasePrice, currencySymbol)}
@@ -264,6 +274,8 @@ export const AdminPurchases: React.FC = () => {
 
   // Form state
   const [purchaseShopId, setPurchaseShopId] = useState('');
+  const [destinationType, setDestinationType] = useState<'SHOP_FLOOR' | 'STORE'>('SHOP_FLOOR');
+  const [purchaseStoreId, setPurchaseStoreId] = useState('');
   const [supplierName, setSupplierName] = useState('');
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [paymentStatus, setPaymentStatus] = useState<'PAID' | 'PARTIAL' | 'UNPAID'>('PAID');
@@ -366,6 +378,11 @@ export const AdminPurchases: React.FC = () => {
         : availableShops[0]?.id) ||
       '';
     setPurchaseShopId(targetShop);
+    setDestinationType('SHOP_FLOOR');
+    const shopStores = (dbState.stores || []).filter(
+      st => st.shopId === targetShop && st.status === 'ACTIVE'
+    );
+    setPurchaseStoreId(shopStores[0]?.id || '');
     setSupplierName('');
     setInvoiceNumber('');
     setPaymentStatus('PAID');
@@ -391,6 +408,8 @@ export const AdminPurchases: React.FC = () => {
     setEditingPurchase(purchase);
     setIsEditMode(true);
     setPurchaseShopId(purchase.shopId);
+    setDestinationType(purchase.storeId ? 'STORE' : 'SHOP_FLOOR');
+    setPurchaseStoreId(purchase.storeId || '');
     setSupplierName(purchase.supplierName);
     setInvoiceNumber(purchase.invoiceNumber || '');
     setPaymentStatus(purchase.paymentStatus);
@@ -511,9 +530,15 @@ export const AdminPurchases: React.FC = () => {
         setFormError(res.error || 'Failed to update purchase.');
       }
     } else {
+      if (destinationType === 'STORE' && !purchaseStoreId) {
+        setFormError('Please select a destination store or switch to Direct to Shop Floor.');
+        return;
+      }
+
       const res = PurchaseService.createPurchase(
         {
           shopId: purchaseShopId || availableShops[0]?.id || '',
+          storeId: destinationType === 'STORE' ? purchaseStoreId : undefined,
           supplierName: finalSupplierName,
           invoiceNumber: invoiceNumber.trim() || undefined,
           items: finalItems,
@@ -527,7 +552,10 @@ export const AdminPurchases: React.FC = () => {
         addToast({
           type: 'success',
           title: 'Purchase Recorded & Stock Ingested',
-          description: `Order from ${finalSupplierName} recorded. Product inventories were automatically restocked.`,
+          description:
+            destinationType === 'STORE'
+              ? `Order from ${finalSupplierName} recorded and added to Store warehouse stock.`
+              : `Order from ${finalSupplierName} recorded. Shop floor inventories were restocked.`,
         });
         setIsModalOpen(false);
       } else {
@@ -630,6 +658,14 @@ export const AdminPurchases: React.FC = () => {
                     <div className="flex items-center justify-between text-[11px]">
                       <span className="text-slate-400 font-medium">
                         {(purchase.items || []).length} items received
+                        {purchase.storeId && (
+                          <span className="text-blue-400 ml-1.5">
+                            · Store:{' '}
+                            {purchase.storeName ||
+                              (dbState.stores || []).find(s => s.id === purchase.storeId)?.name ||
+                              'Warehouse'}
+                          </span>
+                        )}
                       </span>
                       {purchase.invoiceNumber && (
                         <span className="font-mono text-slate-400">
@@ -688,7 +724,17 @@ export const AdminPurchases: React.FC = () => {
                         {purchase.invoiceNumber || '—'}
                       </td>
                       <td className="py-3.5 px-4 text-slate-300">
-                        <div>{(purchase.items || []).length} items</div>
+                        <div>
+                          {(purchase.items || []).length} items
+                          {purchase.storeId && (
+                            <span className="text-[11px] text-blue-400 ml-1.5">
+                              · Store:{' '}
+                              {purchase.storeName ||
+                                (dbState.stores || []).find(s => s.id === purchase.storeId)?.name ||
+                                'Warehouse'}
+                            </span>
+                          )}
+                        </div>
                         <div className="text-[10px] text-slate-500 truncate max-w-xs">
                           {(purchase.items || [])
                             .map(i => `${i.quantity}x ${i.productName}`)
@@ -803,24 +849,100 @@ export const AdminPurchases: React.FC = () => {
             )}
 
             <form onSubmit={handleSavePurchase} className="space-y-4 text-xs">
-              {!isEditMode && (
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    Target Shop / Unit *
-                  </label>
-                  <select
-                    value={purchaseShopId}
-                    onChange={e => setPurchaseShopId(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    {availableShops.map(s => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} ({s.code || 'UNIT'})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
+              {!isEditMode && (() => {
+                const activeShopStores = (dbState.stores || []).filter(
+                  st => st.shopId === purchaseShopId && st.status === 'ACTIVE'
+                );
+                return (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-slate-300 font-medium mb-1">
+                        Target Shop / Unit *
+                      </label>
+                      <select
+                        value={purchaseShopId}
+                        onChange={e => {
+                          const nextShopId = e.target.value;
+                          setPurchaseShopId(nextShopId);
+                          const nextStores = (dbState.stores || []).filter(
+                            st => st.shopId === nextShopId && st.status === 'ACTIVE'
+                          );
+                          setPurchaseStoreId(nextStores[0]?.id || '');
+                        }}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      >
+                        {availableShops.map(s => (
+                          <option key={s.id} value={s.id}>
+                            {s.name} ({s.code || 'UNIT'})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                      <label className="block text-slate-300 font-medium">
+                        Destination *
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setDestinationType('SHOP_FLOOR')}
+                          className={`px-3 py-2 rounded-lg border text-left font-semibold transition ${
+                            destinationType === 'SHOP_FLOOR'
+                              ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                              : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          Direct to Shop Floor
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDestinationType('STORE');
+                            if (!purchaseStoreId && activeShopStores.length > 0) {
+                              setPurchaseStoreId(activeShopStores[0].id);
+                            }
+                          }}
+                          className={`px-3 py-2 rounded-lg border text-left font-semibold transition ${
+                            destinationType === 'STORE'
+                              ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                              : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          Send to Store (Warehouse)
+                        </button>
+                      </div>
+
+                      {destinationType === 'STORE' && (
+                        <div>
+                          <label className="block text-slate-400 text-[11px] mb-1">
+                            Select Store (Warehouse) *
+                          </label>
+                          {activeShopStores.length > 0 ? (
+                            <select
+                              value={purchaseStoreId}
+                              onChange={e => setPurchaseStoreId(e.target.value)}
+                              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            >
+                              <option value="">Select destination store...</option>
+                              {activeShopStores.map(st => (
+                                <option key={st.id} value={st.id}>
+                                  {st.name}
+                                  {st.location ? ` — ${st.location}` : ''}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <p className="text-[11px] text-amber-400 py-1">
+                              No active stores exist for this shop yet. Create one in Stores &amp; Transfers or choose Direct to Shop Floor.
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="space-y-3">
                 <div>

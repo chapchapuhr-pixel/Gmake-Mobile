@@ -18,6 +18,7 @@ export class PurchaseService {
   public static recordPurchase(
     params: {
       shopId?: string;
+      storeId?: string;
       supplierName: string;
       date?: string;
       items: PurchaseItemInput[];
@@ -59,6 +60,21 @@ export class PurchaseService {
     const shop = db.getShops().find(s => s.id === targetShopId);
     if (!shop) {
       return { success: false, error: 'Selected shop does not exist.' };
+    }
+
+    const targetStore = params.storeId
+      ? db.getStores().find(st => st.id === params.storeId)
+      : undefined;
+    if (params.storeId) {
+      if (!targetStore) {
+        return { success: false, error: 'Selected destination store does not exist.' };
+      }
+      if (targetStore.shopId !== targetShopId) {
+        return { success: false, error: 'Selected store does not belong to the chosen shop.' };
+      }
+      if (targetStore.status !== 'ACTIVE') {
+        return { success: false, error: `Store '${targetStore.name}' is inactive.` };
+      }
     }
 
     if (!params.items || params.items.length === 0) {
@@ -106,40 +122,71 @@ export class PurchaseService {
         total: itemTotal,
       });
 
-      // ✅ LATEST PURCHASE PRICE (no averaging)
-      const currentStock = prod.currentStock || 0;
-      const newStock = currentStock + itemInput.quantity;
+      // ✅ LATEST PURCHASE PRICE (no averaging) — route to Store Warehouse or Shop Floor
+      if (targetStore) {
+        const currentStoreStock = prod.storeStock || 0;
+        const newStoreStock = currentStoreStock + itemInput.quantity;
 
-      const prevStock = currentStock;
+        products[prodIndex] = {
+          ...prod,
+          storeStock: newStoreStock,
+          purchasePrice: Number(itemInput.unitCost.toFixed(2)),
+          updatedAt: new Date().toISOString(),
+        };
 
-      // Update product with new stock and LATEST purchase price
-      products[prodIndex] = {
-        ...prod,
-        currentStock: newStock,
-        purchasePrice: Number(itemInput.unitCost.toFixed(2)), // ✅ Always latest price
-        updatedAt: new Date().toISOString(),
-      };
+        const movement = {
+          id: generateUUID(),
+          shopId: targetShopId,
+          shopName: shop.name,
+          storeId: targetStore.id,
+          productId: prod.id,
+          productName: prod.name,
+          previousQty: currentStoreStock,
+          changeQty: itemInput.quantity,
+          newQty: newStoreStock,
+          type: 'PURCHASE' as const,
+          reason: `PO ${purchaseNumber} to Store '${targetStore.name}' [${shop.name}] from ${
+            params.supplierName?.trim() || 'Walk-in Supplier'
+          } @ ${itemInput.unitCost}/unit`,
+          costValue: itemTotal,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          createdAt: new Date().toISOString(),
+        };
+        db.saveMovements([movement, ...db.getMovements()]);
+      } else {
+        const currentStock = prod.currentStock || 0;
+        const newStock = currentStock + itemInput.quantity;
+        const prevStock = currentStock;
 
-      // Record inventory movement with ACTUAL purchase price
-      const movement = {
-        id: generateUUID(),
-        shopId: targetShopId,
-        shopName: shop.name,
-        productId: prod.id,
-        productName: prod.name,
-        previousQty: prevStock,
-        changeQty: itemInput.quantity,
-        newQty: newStock,
-        type: 'PURCHASE' as const,
-        reason: `PO ${purchaseNumber} from ${
-          params.supplierName?.trim() || 'Walk-in Supplier'
-        } [${shop.name}] @ ${itemInput.unitCost}/unit`,
-        costValue: itemTotal,
-        userId: currentUser.id,
-        userName: currentUser.name,
-        createdAt: new Date().toISOString(),
-      };
-      db.saveMovements([movement, ...db.getMovements()]);
+        products[prodIndex] = {
+          ...prod,
+          currentStock: newStock,
+          purchasePrice: Number(itemInput.unitCost.toFixed(2)), // ✅ Always latest price
+          updatedAt: new Date().toISOString(),
+        };
+
+        // Record inventory movement with ACTUAL purchase price
+        const movement = {
+          id: generateUUID(),
+          shopId: targetShopId,
+          shopName: shop.name,
+          productId: prod.id,
+          productName: prod.name,
+          previousQty: prevStock,
+          changeQty: itemInput.quantity,
+          newQty: newStock,
+          type: 'PURCHASE' as const,
+          reason: `PO ${purchaseNumber} from ${
+            params.supplierName?.trim() || 'Walk-in Supplier'
+          } [${shop.name}] @ ${itemInput.unitCost}/unit`,
+          costValue: itemTotal,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          createdAt: new Date().toISOString(),
+        };
+        db.saveMovements([movement, ...db.getMovements()]);
+      }
     }
 
     // Save updated products with new latest costs
@@ -151,6 +198,8 @@ export class PurchaseService {
       id: purchaseId,
       shopId: targetShopId,
       shopName: shop.name,
+      storeId: targetStore?.id,
+      storeName: targetStore?.name,
       purchaseNumber,
       supplierName: finalSupplierName,
       date: params.date || new Date().toISOString().slice(0, 10),
@@ -193,6 +242,7 @@ export class PurchaseService {
   public static createPurchase(
     params: {
       shopId?: string;
+      storeId?: string;
       supplierName: string;
       date?: string;
       items: PurchaseItemInput[];
@@ -246,18 +296,31 @@ export class PurchaseService {
     if (updates.items && updates.items.length > 0) {
       const products = [...db.getProducts()];
 
+      const isStorePurchase = Boolean(current.storeId);
+
       // First, reverse the OLD purchase stock (subtract old quantities)
       for (const oldItem of current.items) {
         const prodIndex = products.findIndex(p => p.id === oldItem.productId);
         if (prodIndex !== -1) {
-          products[prodIndex] = {
-            ...products[prodIndex],
-            currentStock: Math.max(
-              0,
-              (products[prodIndex].currentStock || 0) - oldItem.quantity
-            ),
-            updatedAt: new Date().toISOString(),
-          };
+          if (isStorePurchase) {
+            products[prodIndex] = {
+              ...products[prodIndex],
+              storeStock: Math.max(
+                0,
+                (products[prodIndex].storeStock || 0) - oldItem.quantity
+              ),
+              updatedAt: new Date().toISOString(),
+            };
+          } else {
+            products[prodIndex] = {
+              ...products[prodIndex],
+              currentStock: Math.max(
+                0,
+                (products[prodIndex].currentStock || 0) - oldItem.quantity
+              ),
+              updatedAt: new Date().toISOString(),
+            };
+          }
         }
       }
 
@@ -292,13 +355,17 @@ export class PurchaseService {
         });
 
         // ✅ Use LATEST purchase price (no averaging)
-        const currentStock = products[prodIndex].currentStock || 0;
-        const newTotalStock = currentStock + itemInput.quantity;
+        const prevStock = isStorePurchase
+          ? products[prodIndex].storeStock || 0
+          : products[prodIndex].currentStock || 0;
+        const newTotalStock = prevStock + itemInput.quantity;
 
         // Add new stock with LATEST price
         products[prodIndex] = {
           ...products[prodIndex],
-          currentStock: newTotalStock,
+          ...(isStorePurchase
+            ? { storeStock: newTotalStock }
+            : { currentStock: newTotalStock }),
           purchasePrice: Number(itemInput.unitCost.toFixed(2)), // ✅ Latest price
           updatedAt: new Date().toISOString(),
         };
@@ -308,9 +375,10 @@ export class PurchaseService {
           id: generateUUID(),
           shopId: current.shopId,
           shopName: current.shopName,
+          storeId: current.storeId,
           productId: itemInput.productId,
           productName: products[prodIndex].name,
-          previousQty: currentStock,
+          previousQty: prevStock,
           changeQty: itemInput.quantity,
           newQty: newTotalStock,
           type: 'PURCHASE_EDIT' as const,

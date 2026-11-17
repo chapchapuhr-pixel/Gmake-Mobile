@@ -43,7 +43,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
 
   const isMoreActive = isSeller
     ? ['purchases', 'my_sales', 'notifications', 'receipts', 'sales', 'inventory', 'expenses', 'reports', 'shops', 'sellers', 'settings'].includes(activeTab)
-    : ['shops', 'sellers', 'purchases', 'expenses', 'reports', 'debts', 'notifications', 'data_management', 'settings'].includes(activeTab);
+    : ['shops', 'stores', 'sellers', 'purchases', 'expenses', 'reports', 'debts', 'notifications', 'data_management', 'settings'].includes(activeTab);
 
   return (
     <nav

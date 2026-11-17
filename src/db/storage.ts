@@ -11,6 +11,7 @@ import {
   AuditLog,
   SyncQueueItem,
   Shop,
+  Store,
   ImportHistoryItem,
   DebtRecord,
   AppNotification,
@@ -36,6 +37,7 @@ const DB_PREFIX = 'omnibiz_pos_db_v3_';
 
 export interface DatabaseState {
   shops: Shop[];
+  stores: Store[];
   users: User[];
   categories: Category[];
   products: Product[];
@@ -108,6 +110,7 @@ class LocalDatabase {
 
   public init(): DatabaseState {
     let shops = this.loadTable<Shop[]>('shops', INITIAL_SHOPS);
+    const stores = this.loadTable<Store[]>('stores', []);
     let users = this.loadTable<User[]>('users', INITIAL_USERS);
     let categories = this.loadTable<Category[]>('categories', INITIAL_CATEGORIES);
     let products = this.loadTable<Product[]>('products', INITIAL_PRODUCTS);
@@ -180,6 +183,7 @@ class LocalDatabase {
 
     this.memoryCache = {
       shops: shops || [],
+      stores: stores || [],
       users: users || [],
       categories: categories || [],
       products: products || [],
@@ -232,6 +236,18 @@ class LocalDatabase {
     if (!this.memoryCache) this.init();
     this.memoryCache!.shops = shops;
     this.saveTable('shops', shops);
+    this.notify();
+  }
+
+  // --- Stores (Warehouses) ---
+  public getStores(): Store[] {
+    return this.getState().stores || [];
+  }
+
+  public saveStores(stores: Store[]): void {
+    if (!this.memoryCache) this.init();
+    this.memoryCache!.stores = stores;
+    this.saveTable('stores', stores);
     this.notify();
   }
 
@@ -540,6 +556,7 @@ class LocalDatabase {
       }
 
       this.saveTable('shops', d.shops || INITIAL_SHOPS);
+      this.saveTable('stores', d.stores || []);
       this.saveTable('users', d.users);
       this.saveTable('categories', d.categories || INITIAL_CATEGORIES);
       this.saveTable('products', d.products);
@@ -583,6 +600,7 @@ class LocalDatabase {
     const settings = this.memoryCache?.settings || INITIAL_SETTINGS;
 
     this.saveTable('shops', shops);
+    this.saveTable('stores', []);
     this.saveTable('users', users);
     this.saveTable('categories', []);
     this.saveTable('products', []);

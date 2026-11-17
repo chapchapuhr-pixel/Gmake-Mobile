@@ -52,6 +52,18 @@ export interface Shop {
   updatedAt: string;
 }
 
+export type StoreStatus = 'ACTIVE' | 'INACTIVE';
+
+export interface Store {
+  id: string;
+  shopId: string;
+  name: string;
+  location?: string;
+  status: StoreStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Category {
   id: string;
   shopId: string; // Specific shop this category belongs to
@@ -86,6 +98,7 @@ export interface ProductImage {
 export interface Product {
   id: string;
   shopId: string; // Stable Shop ID
+  storeId?: string; // Optional store association
   name: string;
   sku: string;
   barcode: string;
@@ -93,7 +106,8 @@ export interface Product {
   sellingPrice: number;
   proposedSellingPrice?: number; // Proposed price alias
   purchasePrice: number; // Cost of goods
-  currentStock: number;
+  currentStock: number; // Shop floor stock
+  storeStock?: number; // Warehouse / Store stock
   minStock: number;
   unit: string; // e.g., 'pcs', 'kg', 'box', 'pack', 'liter'
   status: ProductStatus;
@@ -190,12 +204,13 @@ export interface SaleEditRequest {
   reviewedAt?: string;
 }
 
-export type MovementType = 'SALE' | 'PURCHASE' | 'PURCHASE_EDIT' | 'ADJUSTMENT' | 'CORRECTION' | 'RETURN' | 'VOID_RETURN' | 'DAMAGED' | 'BROKEN' | 'EXPIRED' | 'LOST';
+export type MovementType = 'SALE' | 'PURCHASE' | 'PURCHASE_EDIT' | 'ADJUSTMENT' | 'CORRECTION' | 'RETURN' | 'VOID_RETURN' | 'DAMAGED' | 'BROKEN' | 'EXPIRED' | 'LOST' | 'INITIAL_STOCK' | 'STORE_TRANSFER';
 
 export interface InventoryMovement {
   id: string;
   shopId: string;
   shopName?: string;
+  storeId?: string;
   productId: string;
   productName: string;
   previousQty: number;
@@ -226,6 +241,8 @@ export interface Purchase {
   purchaseNumber: string;
   shopId: string;
   shopName?: string;
+  storeId?: string;
+  storeName?: string;
   supplierName: string;
   date: string;
   items: PurchaseItem[];
@@ -293,7 +310,7 @@ export interface AuditLog {
   userName: string;
   action: string;
   details: string;
-  entityType: 'PRODUCT' | 'SALE' | 'PURCHASE' | 'EXPENSE' | 'SELLER' | 'INVENTORY' | 'SETTINGS' | 'AUTH' | 'BACKUP' | 'SHOP' | 'IMPORT' | 'SALE_EDIT' | 'DEBT';
+  entityType: 'PRODUCT' | 'SALE' | 'PURCHASE' | 'EXPENSE' | 'SELLER' | 'INVENTORY' | 'SETTINGS' | 'AUTH' | 'BACKUP' | 'SHOP' | 'STORE' | 'IMPORT' | 'SALE_EDIT' | 'DEBT';
   entityId?: string;
   shopId?: string;
   timestamp: string;
@@ -323,6 +340,9 @@ export type SyncOperation =
   | 'UPDATE_SHOP'
   | 'TOGGLE_SHOP_STATUS'
   | 'DELETE_SHOP'
+  | 'CREATE_STORE'
+  | 'UPDATE_STORE'
+  | 'TRANSFER_STORE_TO_SHOP'
   | 'CREATE_SALE_EDIT_REQUEST'
   | 'REVIEW_SALE_EDIT_REQUEST'
   | 'CREATE_DEBT'

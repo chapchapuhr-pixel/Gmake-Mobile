@@ -137,7 +137,7 @@ class LocalDatabase {
       let mod = false;
       const copy = { ...u };
       if (copy.role === 'ADMIN') {
-        if (copy.username.toLowerCase() === 'admin') {
+        if ((copy.username || '').toLowerCase() === 'admin') {
           copy.username = 'Admin';
           copy.passwordHash = copy.passwordHash || DEFAULT_ADMIN_HASH;
           mod = true;
@@ -583,6 +583,98 @@ class LocalDatabase {
         success: false,
         message: `Failed to restore database: ${e.message || 'JSON parse error'}`,
       };
+    }
+  }
+
+  private static readonly PRE_MIGRATION_KEY = 'omnibiz_pre_migration_snapshot_v1';
+
+  public savePreMigrationSnapshot(label: string = 'Pre-Import Backup'): boolean {
+    try {
+      const state = this.getState();
+      const snapshot = {
+        savedAt: new Date().toISOString(),
+        label,
+        shops: state.shops || [],
+        stores: state.stores || [],
+        categories: state.categories || [],
+        products: state.products || [],
+        sales: state.sales || [],
+        movements: state.movements || [],
+        importHistory: state.importHistory || [],
+        syncQueue: state.syncQueue || [],
+      };
+      localStorage.setItem(LocalDatabase.PRE_MIGRATION_KEY, JSON.stringify(snapshot));
+      return true;
+    } catch (e) {
+      console.warn('[LocalDB] Failed to save pre-migration snapshot (storage quota?):', e);
+      return false;
+    }
+  }
+
+  public hasPreMigrationSnapshot(): {
+    exists: boolean;
+    savedAt?: string;
+    label?: string;
+    productCount?: number;
+    storeCount?: number;
+  } {
+    try {
+      const raw = localStorage.getItem(LocalDatabase.PRE_MIGRATION_KEY);
+      if (!raw) return { exists: false };
+      const parsed = JSON.parse(raw);
+      if (!parsed || !Array.isArray(parsed.products)) return { exists: false };
+      return {
+        exists: true,
+        savedAt: parsed.savedAt,
+        label: parsed.label,
+        productCount: parsed.products.length,
+        storeCount: Array.isArray(parsed.stores) ? parsed.stores.length : 0,
+      };
+    } catch {
+      return { exists: false };
+    }
+  }
+
+  public restorePreMigrationSnapshot(): { success: boolean; message: string } {
+    try {
+      const raw = localStorage.getItem(LocalDatabase.PRE_MIGRATION_KEY);
+      if (!raw) {
+        return { success: false, message: 'No pre-import snapshot is available to restore.' };
+      }
+      const parsed = JSON.parse(raw);
+      if (!parsed || !Array.isArray(parsed.products)) {
+        return { success: false, message: 'Pre-import snapshot is invalid or incomplete.' };
+      }
+
+      if (Array.isArray(parsed.shops)) this.saveTable('shops', parsed.shops);
+      if (Array.isArray(parsed.stores)) this.saveTable('stores', parsed.stores);
+      if (Array.isArray(parsed.categories)) this.saveTable('categories', parsed.categories);
+      this.saveTable('products', parsed.products);
+      if (Array.isArray(parsed.sales)) this.saveTable('sales', parsed.sales);
+      if (Array.isArray(parsed.movements)) this.saveTable('movements', parsed.movements);
+      if (Array.isArray(parsed.importHistory)) this.saveTable('import_history', parsed.importHistory);
+      if (Array.isArray(parsed.syncQueue)) this.saveTable('sync_queue', parsed.syncQueue);
+
+      localStorage.removeItem(LocalDatabase.PRE_MIGRATION_KEY);
+      this.init();
+      this.notify();
+      return {
+        success: true,
+        message: `Rolled back to state before "${parsed.label || 'import'}" (${parsed.products.length} products restored).`,
+      };
+    } catch (e: any) {
+      return {
+        success: false,
+        message: `Rollback failed: ${e.message || 'Unknown error'}`,
+      };
+    }
+  }
+
+  public clearPreMigrationSnapshot(): void {
+    try {
+      localStorage.removeItem(LocalDatabase.PRE_MIGRATION_KEY);
+    } catch {
+      // ignore
     }
   }
 

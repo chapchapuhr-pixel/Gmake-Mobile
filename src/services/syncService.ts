@@ -428,12 +428,17 @@ export class SyncService {
 
       cloudData.stores.forEach((cloudStore: any) => {
         const index = mergedStores.findIndex(s => s.id === cloudStore.id);
+        const existingStore = index !== -1 ? mergedStores[index] : undefined;
         const storeData = {
           id: cloudStore.id,
           shopId: cloudStore.shop_id || cloudStore.shopId,
           name: cloudStore.name,
           location: cloudStore.location || undefined,
           status: cloudStore.status || 'ACTIVE',
+          isShopFloor:
+            cloudStore.is_shop_floor !== undefined
+              ? Boolean(cloudStore.is_shop_floor)
+              : existingStore?.isShopFloor,
           createdAt: cloudStore.created_at || cloudStore.createdAt,
           updatedAt: cloudStore.updated_at || cloudStore.updatedAt,
         };
@@ -564,23 +569,24 @@ export class SyncService {
             updatedAt: img.updated_at,
           }));
 
+        const existingProd = index !== -1 ? mergedProducts[index] : undefined;
         const productData = {
           id: cloudProduct.id,
           shopId: cloudProduct.shop_id,
           name: cloudProduct.name,
           sku: cloudProduct.sku,
-          barcode: cloudProduct.barcode || '',
+          barcode: cloudProduct.barcode || existingProd?.barcode || '',
           categoryId: cloudProduct.category_id,
           sellingPrice: cloudProduct.selling_price,
           proposedSellingPrice: cloudProduct.proposed_selling_price,
           purchasePrice: cloudProduct.purchase_price,
-          currentStock: cloudProduct.current_stock ?? 0,
-          storeStock: cloudProduct.store_stock ?? 0,
+          currentStock: cloudProduct.current_stock ?? existingProd?.currentStock ?? 0,
+          storeStock: cloudProduct.store_stock ?? existingProd?.storeStock ?? 0,
           minStock: cloudProduct.min_stock,
           unit: cloudProduct.unit,
           status: cloudProduct.status,
           imageUrl: cloudProduct.image_url,
-          images: productImages.length > 0 ? productImages : undefined,
+          images: productImages.length > 0 ? productImages : existingProd?.images,
           createdAt: cloudProduct.created_at,
           updatedAt: cloudProduct.updated_at,
         };
@@ -588,7 +594,7 @@ export class SyncService {
         if (index === -1) {
           mergedProducts.push(productData);
         } else {
-          mergedProducts[index] = { ...mergedProducts[index], ...productData };
+          mergedProducts[index] = { ...existingProd, ...productData };
         }
       });
 

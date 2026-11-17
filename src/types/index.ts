@@ -60,6 +60,7 @@ export interface Store {
   name: string;
   location?: string;
   status: StoreStatus;
+  isShopFloor?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -95,11 +96,34 @@ export interface ProductImage {
   updatedAt: string;
 }
 
+export interface ProductStoreStockDetail {
+  storeId: string;
+  storeName: string;
+  quantity: number;
+  unitPurchasePrice: number;
+  unitSellingPrice: number;
+  importedPurchaseValue?: number;
+  importedSaleValue?: number;
+  importedPotentialProfit?: number;
+  historicalUnitsSold?: number;
+  historicalUnitsTransferred?: number;
+  historicalUnitsAdjusted?: number;
+  lastImportedAt?: string;
+}
+
+export interface ProductCustomFields {
+  field1?: string;
+  field2?: string;
+  field3?: string;
+  field4?: string;
+}
+
 export interface Product {
   id: string;
   shopId: string; // Stable Shop ID
   storeId?: string; // Optional store association
   name: string;
+  variation?: string; // Product variation (e.g., color, size, wattage)
   sku: string;
   barcode: string;
   categoryId: string;
@@ -108,9 +132,19 @@ export interface Product {
   purchasePrice: number; // Cost of goods
   currentStock: number; // Shop floor stock
   storeStock?: number; // Warehouse / Store stock
+  storeStocks?: Record<string, number>; // Per-store quantity breakdown keyed by Store.id
+  storeDetails?: Record<string, ProductStoreStockDetail>; // Per-store valuations & historical metrics
   minStock: number;
   unit: string; // e.g., 'pcs', 'kg', 'box', 'pack', 'liter'
   status: ProductStatus;
+  customFields?: ProductCustomFields;
+  importedPurchaseValue?: number; // Preserved source stock value by purchase price
+  importedSaleValue?: number; // Preserved source stock value by sale price
+  importedPotentialProfit?: number; // Preserved source potential profit
+  historicalUnitsSold?: number; // Aggregate historical reference (undated, never counted as dated live sales)
+  historicalUnitsTransferred?: number; // Aggregate historical transferred reference
+  historicalUnitsAdjusted?: number; // Aggregate historical adjusted reference
+  historicalNote?: string; // e.g., 'Historical date unavailable'
   imageUrl?: string; // Main image URL/dataUrl (for backward compatibility)
   images?: ProductImage[]; // Optional array of up to 3 ProductImages
   createdAt: string;
@@ -395,6 +429,13 @@ export interface ImportHistoryItem {
   failedCount: number;
   updatedCount?: number;
   createdCount?: number;
+  skippedCount?: number;
+  fileHash?: string;
+  format?: 'SIMPLE_4_COL' | 'SONKO_19_COL' | 'DETAILED_SALES_HISTORY';
+  strategy?: 'RESTORE_REPLACE' | 'MERGE_ADD' | 'NEW_ONLY';
+  storesCreated?: string[];
+  historicalUnitsSold?: number;
+  rollbackAvailable?: boolean;
   importedByUserId: string;
   importedByName: string;
   createdAt: string;

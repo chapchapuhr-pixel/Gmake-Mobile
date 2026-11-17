@@ -12,16 +12,28 @@ import {
   Cloud,
   Code,
   AlertCircle,
+  Warehouse,
+  ShieldAlert,
+  SlidersHorizontal,
+  History as HistoryIcon,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { db } from '../../db/storage';
 import { BackupService } from '../../services/backupService';
 import { QuickBooksService } from '../../services/quickbooksService';
 import { SyncService } from '../../services/syncService';
 import { CsvDataService, ImportValidationResult } from '../../services/csvDataService';
-import { ExcelImportService, ExcelParseResult } from '../../services/excelImportService';
+import {
+  CanonicalImportField,
+  ExcelImportService,
+  ImportFormatType,
+  MigrationCommitResult,
+  MigrationStrategy,
+  UnifiedParseResult,
+} from '../../services/excelImportService';
 import { ExcelExportService } from '../../services/excelExportService';
 import { CsvDataType } from '../../types';
-import { formatDateTime } from '../../utils/formatters';
+import { formatCurrency, formatDateTime } from '../../utils/formatters';
 
 type ExportFormat = 'xlsx' | 'csv';
 
@@ -41,10 +53,15 @@ export const AdminDataManagement: React.FC = () => {
   const [validationResult, setValidationResult] = useState<ImportValidationResult | null>(null);
   const [isImporting, setIsImporting] = useState(false);
 
-  // EXCEL Import State
+  // EXCEL / CSV IMPORT STATE
   const [excelFile, setExcelFile] = useState<File | null>(null);
-  const [excelShopId, setExcelShopId] = useState<string>('');
-  const [excelParseResult, setExcelParseResult] = useState<ExcelParseResult | null>(null);
+  const [excelShopId, setExcelShopId] = useState<string>(() => (dbState.shops || [])[0]?.id || '');
+  const [excelParseResult, setExcelParseResult] = useState<UnifiedParseResult | null>(null);
+  const [targetStoreId, setTargetStoreId] = useState<string>('');
+  const [migrationStrategy, setMigrationStrategy] = useState<MigrationStrategy>('RESTORE_REPLACE');
+  const [shopFloorLocationName, setShopFloorLocationName] = useState<string>('');
+  const [showColumnMapping, setShowColumnMapping] = useState<boolean>(false);
+  const [lastImportReport, setLastImportReport] = useState<MigrationCommitResult | null>(null);
   const [isParsingExcel, setIsParsingExcel] = useState(false);
   const [isCommitting, setIsCommitting] = useState(false);
 
@@ -65,42 +82,112 @@ export const AdminDataManagement: React.FC = () => {
   if (!currentUser || currentUser.role !== 'ADMIN') return null;
 
   const shops = dbState.shops || [];
+  const stores = dbState.stores || [];
+  const settings = dbState.settings;
   const importHistory = dbState.importHistory || [];
+  const preSnapshotInfo = db.hasPreMigrationSnapshot();
 
   // ==============================
-  // EXCEL IMPORT HANDLERS
+  // EXCEL / CSV IMPORT HANDLERS
   // ==============================
   const handleExcelFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!excelShopId) {
+    const effectiveShopId = excelShopId || shops[0]?.id || '';
+    if (!effectiveShopId) {
       addToast({
         type: 'warning',
         title: 'Select Shop First',
-        description: 'Please choose the target shop before uploading.',
+        description: 'Please create or choose a target shop before uploading.',
       });
       return;
     }
+    if (!excelShopId) setExcelShopId(effectiveShopId);
 
     setExcelFile(file);
+    setLastImportReport(null);
     setIsParsingExcel(true);
-    const result = await ExcelImportService.parseExcelFile(file);
+    const result = await ExcelImportService.parseImportFile(file, effectiveShopId);
     setIsParsingExcel(false);
     setExcelParseResult(result);
+    setShowColumnMapping(result.needsManualMapping);
 
-    if (result.errors.length > 0) {
+    if (result.format === 'SIMPLE_4_COL') {
+      setMigrationStrategy('MERGE_ADD');
+      setTargetStoreId('');
+    } else if (result.format === 'SONKO_19_COL') {
+      setMigrationStrategy('RESTORE_REPLACE');
+      const defaultFloor = result.previewSummary.storesDetected.find(s => s.isDefaultFloor);
+      setShopFloorLocationName(defaultFloor ? defaultFloor.name : 'NONE');
+    } else if (result.format === 'DETAILED_SALES_HISTORY') {
+      setMigrationStrategy('NEW_ONLY');
+    }
+
+    if (result.needsManualMapping) {
+      addToast({
+        type: 'warning',
+        title: 'Column Mapping Needed',
+        description: 'Verify or map columns manually before importing.',
+      });
+    } else if (result.duplicateImportWarning) {
+      addToast({
+        type: 'warning',
+        title: 'File Already Imported Earlier',
+        description: 'Duplicate file detected. Use Restore/Replace or New Only to prevent double stock.',
+      });
+    } else if (result.errors.length > 0) {
       addToast({
         type: 'warning',
         title: 'Validation Issues',
         description: `${result.errors.length} issue(s) found. Review before committing.`,
       });
-    } else if (result.rows.length > 0) {
+    } else {
       addToast({
         type: 'success',
-        title: 'Excel Parsed',
-        description: `${result.rows.length} product rows ready to import.`,
+        title: 'File Analyzed & Ready',
+        description: `${result.previewSummary.validRows} rows (${result.previewSummary.uniqueProductsCount} products) ready to import.`,
       });
+    }
+  };
+
+  const handleManualMappingChange = (
+    field: CanonicalImportField,
+    headerName: string,
+    overrideFormat?: ImportFormatType
+  ) => {
+    if (!excelParseResult) return;
+    const nextMap = { ...excelParseResult.columnMapping };
+    if (headerName) {
+      nextMap[field] = headerName;
+    } else {
+      delete nextMap[field];
+    }
+    const nextFormat = overrideFormat || excelParseResult.format;
+    const updated = ExcelImportService.reparseWithMapping(
+      excelParseResult,
+      nextMap,
+      nextFormat === 'UNCERTAIN' ? 'SONKO_19_COL' : nextFormat,
+      excelShopId
+    );
+    setExcelParseResult(updated);
+  };
+
+  const handleManualFormatSwitch = (nextFormat: ImportFormatType) => {
+    if (!excelParseResult) return;
+    const updated = ExcelImportService.reparseWithMapping(
+      excelParseResult,
+      excelParseResult.columnMapping,
+      nextFormat,
+      excelShopId
+    );
+    setExcelParseResult(updated);
+    if (nextFormat === 'SIMPLE_4_COL') {
+      setMigrationStrategy('MERGE_ADD');
+    } else if (nextFormat === 'SONKO_19_COL') {
+      setMigrationStrategy('RESTORE_REPLACE');
+      const defaultFloor = updated.previewSummary.storesDetected.find(s => s.isDefaultFloor);
+      setShopFloorLocationName(defaultFloor ? defaultFloor.name : 'NONE');
     }
   };
 
@@ -108,29 +195,60 @@ export const AdminDataManagement: React.FC = () => {
     if (!excelParseResult || !excelShopId) return;
     setIsCommitting(true);
 
-    const res = await ExcelImportService.commitImport(
-      excelParseResult.rows,
-      excelShopId,
+    const res = ExcelImportService.commitMigrationImport(
+      excelParseResult,
+      {
+        shopId: excelShopId,
+        targetStoreId: excelParseResult.format === 'SIMPLE_4_COL' ? targetStoreId : undefined,
+        shopFloorLocationName:
+          excelParseResult.format === 'SONKO_19_COL' ? shopFloorLocationName : undefined,
+        strategy: migrationStrategy,
+        createPreSnapshot: true,
+      },
       currentUser
     );
     setIsCommitting(false);
+    setLastImportReport(res);
 
-    if (res.errors.length === 0) {
+    if (res.success) {
+      const targetShopName = shops.find(s => s.id === excelShopId)?.name || 'shop';
       addToast({
         type: 'success',
         title: 'Import Successful',
-        description: `${res.created} created, ${res.updated} updated in ${
-          shops.find(s => s.id === excelShopId)?.name
-        }.`,
+        description:
+          res.format === 'DETAILED_SALES_HISTORY'
+            ? `${res.salesImported} historical sales imported (${res.skippedRecords} skipped).`
+            : `${res.createdProducts} created, ${res.updatedProducts} updated in ${targetShopName}${
+                res.storesCreated.length > 0 ? `, ${res.storesCreated.length} store(s) created` : ''
+              }.`,
       });
       setExcelParseResult(null);
       setExcelFile(null);
+      setShowColumnMapping(false);
       if (excelInputRef.current) excelInputRef.current.value = '';
     } else {
       addToast({
         type: 'error',
         title: 'Import Completed with Errors',
-        description: `${res.created} created, ${res.updated} updated, ${res.errors.length} failed.`,
+        description: `${res.createdProducts} created, ${res.updatedProducts} updated, ${res.errors.length} error(s).`,
+      });
+    }
+  };
+
+  const handleRollbackLastImport = () => {
+    const res = db.restorePreMigrationSnapshot();
+    if (res.success) {
+      setLastImportReport(null);
+      addToast({
+        type: 'success',
+        title: 'Rollback Completed',
+        description: res.message,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Rollback Failed',
+        description: res.message,
       });
     }
   };
@@ -491,17 +609,105 @@ export const AdminDataManagement: React.FC = () => {
             </button>
           </div>
 
-          {/* 1. IMPORT EXCEL SECTION */}
+          {/* 1. IMPORT EXCEL / CSV SECTION */}
           {csvSection === 'import' && (
             <div className="space-y-4">
+              {/* Pre-migration rollback card */}
+              {preSnapshotInfo.exists && (
+                <div className="bg-amber-950/30 border border-amber-700/40 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="text-xs">
+                    <div className="font-bold text-amber-300 flex items-center gap-1.5">
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Pre-Import Snapshot Available
+                    </div>
+                    <p className="text-[11px] text-amber-200/80 mt-0.5">
+                      Saved before "{preSnapshotInfo.label}" ({preSnapshotInfo.productCount} products, {preSnapshotInfo.storeCount} stores)
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRollbackLastImport}
+                    className="px-3 py-2 rounded-xl bg-amber-600/25 hover:bg-amber-600/40 text-amber-200 border border-amber-500/40 text-xs font-semibold transition shrink-0"
+                  >
+                    Rollback Last Import
+                  </button>
+                </div>
+              )}
+
+              {/* Post-Import Summary Banner */}
+              {lastImportReport && (
+                <div className="bg-emerald-950/30 border border-emerald-700/50 rounded-2xl p-4 space-y-2.5 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="font-bold text-emerald-300 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-4 h-4" />
+                      Migration &amp; Import Report ({lastImportReport.format})
+                    </div>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-900/50 text-emerald-200">
+                      {lastImportReport.strategy}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                    <div className="p-2 rounded-lg bg-slate-950/80 border border-slate-800">
+                      <span className="text-slate-400 block">Created</span>
+                      <span className="font-bold text-emerald-400 font-mono">
+                        {lastImportReport.format === 'DETAILED_SALES_HISTORY'
+                          ? `${lastImportReport.salesImported} sales`
+                          : `${lastImportReport.createdProducts} products`}
+                      </span>
+                    </div>
+                    <div className="p-2 rounded-lg bg-slate-950/80 border border-slate-800">
+                      <span className="text-slate-400 block">Updated</span>
+                      <span className="font-bold text-blue-400 font-mono">
+                        {lastImportReport.updatedProducts}
+                      </span>
+                    </div>
+                    <div className="p-2 rounded-lg bg-slate-950/80 border border-slate-800">
+                      <span className="text-slate-400 block">Skipped</span>
+                      <span className="font-bold text-slate-300 font-mono">
+                        {lastImportReport.skippedRecords}
+                      </span>
+                    </div>
+                    <div className="p-2 rounded-lg bg-slate-950/80 border border-slate-800">
+                      <span className="text-slate-400 block">New Stores</span>
+                      <span className="font-bold text-purple-300 font-mono">
+                        {lastImportReport.storesCreated.length}
+                      </span>
+                    </div>
+                  </div>
+                  {lastImportReport.storesCreated.length > 0 && (
+                    <p className="text-[11px] text-slate-300">
+                      <strong>Created Stores:</strong> {lastImportReport.storesCreated.join(', ')}
+                    </p>
+                  )}
+                  {lastImportReport.categoriesCreated.length > 0 && (
+                    <p className="text-[11px] text-slate-300">
+                      <strong>Created Categories:</strong> {lastImportReport.categoriesCreated.join(', ')}
+                    </p>
+                  )}
+                  {lastImportReport.historicalUnitsPreserved > 0 && (
+                    <p className="text-[11px] text-amber-300">
+                      <strong>Historical Totals Preserved:</strong> {lastImportReport.historicalUnitsPreserved.toLocaleString()} units sold (stored with "Historical date unavailable" — excluded from dated sales reports).
+                    </p>
+                  )}
+                  {lastImportReport.errors.length > 0 && (
+                    <div className="p-2 rounded-lg bg-rose-950/40 border border-rose-800/40 text-rose-200 text-[11px]">
+                      {lastImportReport.errors.slice(0, 5).map((err, i) => (
+                        <div key={i}>• {err}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Upload Box */}
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
                 <div>
                   <h3 className="font-bold text-sm text-white flex items-center gap-2">
                     <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
-                    Import Products from Excel
+                    Import Products &amp; Legacy Store Data
                   </h3>
                   <p className="text-[11px] text-slate-400 mt-1">
-                    Select a shop, then upload an Excel file (.xlsx / .xls)
+                    Automatically detects 4-column Excel sheets, 19-column SONKO multi-store exports, and timestamped sales history (.xlsx, .xls, .csv)
                   </p>
                 </div>
 
@@ -516,6 +722,7 @@ export const AdminDataManagement: React.FC = () => {
                         setExcelShopId(e.target.value);
                         setExcelParseResult(null);
                         setExcelFile(null);
+                        setTargetStoreId('');
                         if (excelInputRef.current) excelInputRef.current.value = '';
                       }}
                       className="w-full bg-slate-950 text-xs text-white px-3 py-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-blue-500"
@@ -531,12 +738,12 @@ export const AdminDataManagement: React.FC = () => {
 
                   <div>
                     <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                      Excel File (.xlsx / .xls) <span className="text-rose-400">*</span>
+                      Spreadsheet File (.xlsx / .xls / .csv) <span className="text-rose-400">*</span>
                     </label>
                     <input
                       ref={excelInputRef}
                       type="file"
-                      accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                      accept=".xlsx,.xls,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
                       disabled={!excelShopId}
                       onChange={handleExcelFileSelected}
                       className="w-full bg-slate-950 text-xs text-slate-300 file:mr-2 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-500 cursor-pointer p-1.5 rounded-xl border border-slate-800 disabled:opacity-40"
@@ -549,11 +756,19 @@ export const AdminDataManagement: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Format hint */}
-                <div className="p-3 bg-blue-950/30 border border-blue-800/40 rounded-xl text-[11px] text-blue-200">
-                  <strong>Excel Format:</strong>
-                  <div className="mt-1 font-mono text-[10px] text-blue-100 overflow-x-auto whitespace-nowrap">
-                    | Product Name | Buying Price | Selling Price | Quantity |
+                {/* Supported Formats hint */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                  <div className="p-3 bg-blue-950/30 border border-blue-800/40 rounded-xl text-blue-200">
+                    <strong>Simple Format (4 Columns):</strong>
+                    <div className="mt-1 font-mono text-[10px] text-blue-100 overflow-x-auto whitespace-nowrap">
+                      Product Name | Buying Price | Selling Price | Quantity
+                    </div>
+                  </div>
+                  <div className="p-3 bg-emerald-950/25 border border-emerald-800/40 rounded-xl text-emerald-200">
+                    <strong>Full SONKO Export (19 Columns):</strong>
+                    <div className="mt-1 font-mono text-[10px] text-emerald-100 overflow-x-auto whitespace-nowrap">
+                      SKU | Product | Variation | Category | Location | Prices | Stock | Sold…
+                    </div>
                   </div>
                 </div>
               </div>
@@ -562,72 +777,381 @@ export const AdminDataManagement: React.FC = () => {
               {isParsingExcel && (
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 text-center text-slate-400 text-xs">
                   <RefreshCw className="w-5 h-5 mx-auto mb-2 animate-spin text-blue-400" />
-                  Reading Excel file...
+                  Analyzing spreadsheet columns &amp; stores...
                 </div>
               )}
 
-              {/* Parse Result Preview */}
+              {/* Parse Result Preview, Mapping & Strategy Options */}
               {excelParseResult && !isParsingExcel && (
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
-                  <div className="flex flex-col gap-3 pb-3 border-b border-slate-800">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
                     <div>
-                      <h4 className="font-bold text-sm text-white">Validation Summary</h4>
-                      <p className="text-[11px] text-slate-400">
-                        {excelFile?.name} • {excelParseResult.sheetName}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 className="font-bold text-sm text-white">Preview &amp; Validation</h4>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/15 text-blue-300 border border-blue-500/30">
+                          {excelParseResult.format === 'SONKO_19_COL'
+                            ? 'SONKO 19-Column Migration'
+                            : excelParseResult.format === 'SIMPLE_4_COL'
+                              ? 'Simple 4-Column Excel'
+                              : excelParseResult.format === 'DETAILED_SALES_HISTORY'
+                                ? 'Timestamped Sales History'
+                                : 'Manual Mapping Required'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        {excelParseResult.fileName} • {excelParseResult.sheetName || 'Sheet1'} • {excelParseResult.headers.length} columns
                       </p>
                     </div>
 
-                    {excelParseResult.rows.length > 0 && (
-                      <button
-                        onClick={handleCommitExcelImport}
-                        disabled={isCommitting}
-                        className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white text-xs font-semibold py-3 rounded-xl shadow-sm transition disabled:opacity-50"
-                      >
-                        <CheckCircle2 className="w-4 h-4" />
-                        <span>
-                          {isCommitting
-                            ? 'Importing...'
-                            : `Confirm & Import to ${shops.find(s => s.id === excelShopId)?.name}`}
-                        </span>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => setShowColumnMapping(v => !v)}
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition"
+                    >
+                      <SlidersHorizontal className="w-3.5 h-3.5" />
+                      <span>{showColumnMapping ? 'Hide Mapping' : 'Column Mapping'}</span>
+                    </button>
                   </div>
 
-                  {/* Metric cards */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-center">
-                      <span className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">
-                        Total Rows
+                  {/* Duplicate File Warning */}
+                  {excelParseResult.duplicateImportWarning && (
+                    <div className="p-3 bg-amber-950/40 border border-amber-600/50 rounded-xl text-xs text-amber-200 flex items-start gap-2.5">
+                      <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      <div>
+                        <div className="font-bold text-amber-300">
+                          Duplicate File Warning — Previously Imported
+                        </div>
+                        <p className="text-[11px] text-amber-200/90 mt-0.5">
+                          Identical file content ("{excelParseResult.duplicateImportWarning.fileName}") was imported on{' '}
+                          {formatDateTime(excelParseResult.duplicateImportWarning.importedAt)}.
+                          Using <strong>Restore / Replace</strong> or <strong>New Only</strong> prevents doubling stock or historical sales.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Column Mapping Screen (when uncertain or toggled) */}
+                  {(showColumnMapping || excelParseResult.needsManualMapping) && (
+                    <div className="p-3.5 bg-slate-950 rounded-xl border border-slate-800 space-y-3 text-xs">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div>
+                          <div className="font-bold text-white">Column Detection &amp; Mapping</div>
+                          <p className="text-[11px] text-slate-400">
+                            Match file headers to system fields if needed.
+                          </p>
+                        </div>
+                        <select
+                          value={excelParseResult.format}
+                          onChange={e => handleManualFormatSwitch(e.target.value as ImportFormatType)}
+                          className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white"
+                        >
+                          <option value="SIMPLE_4_COL">Simple 4-Column Format</option>
+                          <option value="SONKO_19_COL">Full SONKO 19-Column Format</option>
+                          <option value="DETAILED_SALES_HISTORY">Detailed Sales History (Dated)</option>
+                        </select>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                        {(
+                          excelParseResult.format === 'SIMPLE_4_COL'
+                            ? ([
+                                ['productName', 'Product Name *'],
+                                ['buyingPrice', 'Buying Price'],
+                                ['sellingPrice', 'Selling Price *'],
+                                ['quantity', 'Quantity *'],
+                              ] as [CanonicalImportField, string][])
+                            : excelParseResult.format === 'DETAILED_SALES_HISTORY'
+                              ? ([
+                                  ['saleDate', 'Sale Date *'],
+                                  ['receiptNumber', 'Receipt / Invoice #'],
+                                  ['productName', 'Product Name *'],
+                                  ['variation', 'Variation'],
+                                  ['sku', 'SKU'],
+                                  ['quantity', 'Quantity *'],
+                                  ['sellingPrice', 'Selling Price *'],
+                                  ['buyingPrice', 'Buying Price'],
+                                  ['location', 'Location / Store'],
+                                  ['paymentMethod', 'Payment Method'],
+                                ] as [CanonicalImportField, string][])
+                              : ([
+                                  ['productName', 'Product *'],
+                                  ['sku', 'SKU'],
+                                  ['variation', 'Variation'],
+                                  ['category', 'Category'],
+                                  ['location', 'Location (Store)'],
+                                  ['buyingPrice', 'Unit Purchase Price'],
+                                  ['sellingPrice', 'Unit Selling Price *'],
+                                  ['quantity', 'Current Stock *'],
+                                  ['purchaseValue', 'Stock Value (Purchase)'],
+                                  ['saleValue', 'Stock Value (Sale)'],
+                                  ['potentialProfit', 'Potential Profit'],
+                                  ['totalSold', 'Total Unit Sold'],
+                                  ['totalTransferred', 'Total Unit Transfered'],
+                                  ['totalAdjusted', 'Total Unit Adjusted'],
+                                  ['customField1', 'Custom Field1'],
+                                  ['customField2', 'Custom Field2'],
+                                  ['customField3', 'Custom Field3'],
+                                  ['customField4', 'Custom Field4'],
+                                ] as [CanonicalImportField, string][])
+                        ).map(([field, label]) => (
+                          <div key={field}>
+                            <label className="block text-[10px] text-slate-400 mb-1">{label}</label>
+                            <select
+                              value={excelParseResult.columnMapping[field] || ''}
+                              onChange={e => handleManualMappingChange(field, e.target.value)}
+                              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-white"
+                            >
+                              <option value="">-- Not mapped --</option>
+                              {excelParseResult.headers.map(h => (
+                                <option key={h} value={h}>
+                                  {h}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Simple 4-Col Store Destination Selector */}
+                  {excelParseResult.format === 'SIMPLE_4_COL' && (
+                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs">
+                      <label className="block font-semibold text-slate-200 flex items-center gap-1.5">
+                        <Warehouse className="w-3.5 h-3.5 text-blue-400" />
+                        Destination Store for Imported Stock
+                      </label>
+                      <select
+                        value={targetStoreId}
+                        onChange={e => setTargetStoreId(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
+                      >
+                        <option value="">Direct to Shop Floor (POS Sellable Stock)</option>
+                        {stores
+                          .filter(st => st.shopId === excelShopId && st.status === 'ACTIVE')
+                          .map(st => (
+                            <option key={st.id} value={st.id}>
+                              Store: {st.name}
+                              {st.location ? ` (${st.location})` : ''}
+                            </option>
+                          ))}
+                      </select>
+                      <p className="text-[10px] text-slate-400">
+                        Choose whether these quantities go directly onto the Shop Floor or into a specific Warehouse Store.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* SONKO 19-Col Floor Store Mapping Selector */}
+                  {excelParseResult.format === 'SONKO_19_COL' &&
+                    excelParseResult.previewSummary.storesDetected.length > 0 && (
+                      <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2.5 text-xs">
+                        <label className="block font-semibold text-slate-200 flex items-center gap-1.5">
+                          <Warehouse className="w-3.5 h-3.5 text-blue-400" />
+                          Stores Detected ({excelParseResult.previewSummary.storesDetected.length})
+                        </label>
+
+                        <div className="flex flex-wrap gap-1.5">
+                          {excelParseResult.previewSummary.storesDetected.map(st => (
+                            <div
+                              key={st.name}
+                              className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-[11px] flex items-center gap-2"
+                            >
+                              <span className="font-semibold text-white">{st.name}</span>
+                              <span className="text-slate-400 font-mono">
+                                {st.rowCount} rows · {st.totalUnits.toLocaleString()} qty
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                                  st.existsInShop
+                                    ? 'bg-blue-500/15 text-blue-300'
+                                    : 'bg-emerald-500/15 text-emerald-300'
+                                }`}
+                              >
+                                {st.existsInShop ? 'Matched' : 'New Store'}
+                              </span>
+                              {shopFloorLocationName === st.name && (
+                                <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300">
+                                  POS Floor
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">
+                            Which location acts as POS Shop Floor (direct sellable stock)?
+                          </label>
+                          <select
+                            value={shopFloorLocationName}
+                            onChange={e => setShopFloorLocationName(e.target.value)}
+                            className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
+                          >
+                            {excelParseResult.previewSummary.storesDetected.map(st => (
+                              <option key={st.name} value={st.name}>
+                                {st.name} (POS Shop Floor + Store View)
+                              </option>
+                            ))}
+                            <option value="NONE">None (Keep all locations in Warehouse Stores)</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
+
+                  {/* Import Strategy Selector */}
+                  {excelParseResult.format !== 'DETAILED_SALES_HISTORY' &&
+                    excelParseResult.format !== 'UNCERTAIN' && (
+                      <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs">
+                        <label className="block font-semibold text-slate-200">
+                          Import Strategy
+                        </label>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          {[
+                            {
+                              id: 'RESTORE_REPLACE' as MigrationStrategy,
+                              title: 'Restore / Replace',
+                              desc: 'Sets exact store quantities & historical totals. Safe if re-importing same file.',
+                            },
+                            {
+                              id: 'NEW_ONLY' as MigrationStrategy,
+                              title: 'New Only',
+                              desc: 'Only imports products or store allocations that do not exist yet.',
+                            },
+                            {
+                              id: 'MERGE_ADD' as MigrationStrategy,
+                              title: 'Merge & Add Stock',
+                              desc: 'Adds imported quantities onto existing stock levels.',
+                            },
+                          ].map(opt => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => setMigrationStrategy(opt.id)}
+                              className={`p-2.5 rounded-xl border text-left transition ${
+                                migrationStrategy === opt.id
+                                  ? 'bg-blue-600/20 border-blue-500 text-white'
+                                  : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              <div className="font-bold text-xs">{opt.title}</div>
+                              <div className="text-[10px] opacity-80 mt-0.5 leading-snug">
+                                {opt.desc}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                        {migrationStrategy === 'MERGE_ADD' &&
+                          excelParseResult.duplicateImportWarning && (
+                            <p className="text-[11px] text-amber-400 pt-1">
+                              ⚠ Warning: Re-importing this exact file with "Merge &amp; Add" will double existing quantities. Consider "Restore / Replace".
+                            </p>
+                          )}
+                      </div>
+                    )}
+
+                  {/* Preview Summary Metrics */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div className="p-2.5 bg-slate-950 rounded-xl border border-slate-800 text-center">
+                      <span className="text-[10px] text-slate-400 uppercase block">Products</span>
+                      <span className="text-sm font-bold text-white font-mono">
+                        {excelParseResult.previewSummary.uniqueProductsCount}
                       </span>
-                      <span className="text-sm font-bold text-slate-200">
-                        {excelParseResult.rows.length}
+                      {excelParseResult.previewSummary.variationsCount > 0 && (
+                        <span className="text-[10px] text-blue-300 block">
+                          {excelParseResult.previewSummary.variationsCount} variations
+                        </span>
+                      )}
+                    </div>
+                    <div className="p-2.5 bg-slate-950 rounded-xl border border-slate-800 text-center">
+                      <span className="text-[10px] text-slate-400 uppercase block">Records</span>
+                      <span className="text-sm font-bold text-emerald-400 font-mono">
+                        {excelParseResult.previewSummary.validRows}
+                      </span>
+                      <span className="text-[10px] text-slate-500 block">
+                        {excelParseResult.previewSummary.totalQuantity.toLocaleString()} units
                       </span>
                     </div>
-                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-center">
-                      <span className="text-[10px] text-emerald-400 uppercase tracking-wider block mb-1">
-                        Ready
+                    <div className="p-2.5 bg-slate-950 rounded-xl border border-slate-800 text-center">
+                      <span className="text-[10px] text-slate-400 uppercase block">Stock Value (Cost)</span>
+                      <span className="text-xs font-bold text-purple-300 font-mono">
+                        {formatCurrency(
+                          excelParseResult.previewSummary.totalPurchaseValue,
+                          settings.currencySymbol
+                        )}
                       </span>
-                      <span className="text-sm font-bold text-emerald-400">
-                        {excelParseResult.rows.length - excelParseResult.errors.length}
-                      </span>
-                    </div>
-                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-center">
-                      <span className="text-[10px] text-rose-400 uppercase tracking-wider block mb-1">
-                        Errors
-                      </span>
-                      <span className="text-sm font-bold text-rose-400">
-                        {excelParseResult.errors.length}
+                      <span className="text-[10px] text-slate-500 block">
+                        Errors: {excelParseResult.errors.length}
                       </span>
                     </div>
-                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-center">
-                      <span className="text-[10px] text-blue-400 uppercase tracking-wider block mb-1">
-                        Shop
+                    <div className="p-2.5 bg-slate-950 rounded-xl border border-slate-800 text-center">
+                      <span className="text-[10px] text-slate-400 uppercase block">Potential Sale</span>
+                      <span className="text-xs font-bold text-emerald-400 font-mono">
+                        {formatCurrency(
+                          excelParseResult.previewSummary.totalSaleValue,
+                          settings.currencySymbol
+                        )}
                       </span>
-                      <span className="text-[11px] font-bold text-blue-300 truncate block">
-                        {shops.find(s => s.id === excelShopId)?.name || '-'}
+                      <span className="text-[10px] text-emerald-300/80 block font-mono">
+                        +{formatCurrency(
+                          excelParseResult.previewSummary.totalPotentialProfit,
+                          settings.currencySymbol
+                        )}
                       </span>
                     </div>
                   </div>
+
+                  {/* Separate Historical Reference Notice (Never mixed into dated sales) */}
+                  {excelParseResult.format === 'SONKO_19_COL' &&
+                    (excelParseResult.previewSummary.totalHistoricalSold > 0 ||
+                      excelParseResult.previewSummary.totalHistoricalTransferred > 0 ||
+                      excelParseResult.previewSummary.totalHistoricalAdjusted > 0) && (
+                      <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-1.5 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold text-slate-200 flex items-center gap-1.5">
+                            <HistoryIcon className="w-3.5 h-3.5 text-amber-400" />
+                            Historical Activity Totals Detected
+                          </span>
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-semibold">
+                            Historical date unavailable
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-[11px] font-mono">
+                          <div>
+                            Sold: <strong className="text-white">{excelParseResult.previewSummary.totalHistoricalSold.toLocaleString()}</strong>
+                          </div>
+                          <div>
+                            Transferred: <strong className="text-white">{excelParseResult.previewSummary.totalHistoricalTransferred.toLocaleString()}</strong>
+                          </div>
+                          <div>
+                            Adjusted: <strong className="text-white">{excelParseResult.previewSummary.totalHistoricalAdjusted.toLocaleString()}</strong>
+                          </div>
+                        </div>
+                        <p className="text-[10px] text-slate-400">
+                          Stored strictly as historical reference on Store &amp; Product records. Never counted as today's/monthly/yearly live sales and never deducted from restored stock.
+                        </p>
+                      </div>
+                    )}
+
+                  {/* Warnings */}
+                  {excelParseResult.warnings.length > 0 && (
+                    <div className="p-3 bg-amber-950/20 border border-amber-800/40 rounded-xl space-y-1.5">
+                      <h5 className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                        <AlertTriangle className="w-4 h-4" />
+                        Warnings ({excelParseResult.warnings.length})
+                      </h5>
+                      <div className="max-h-28 overflow-y-auto space-y-1 text-[11px] text-amber-200/90">
+                        {excelParseResult.warnings.slice(0, 15).map((w, i) => (
+                          <div key={i}>
+                            <span className="font-mono text-[10px] bg-amber-900/50 px-1 py-0.2 rounded mr-1.5">
+                              Row {w.rowNumber}
+                            </span>
+                            {w.message}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Errors */}
                   {excelParseResult.errors.length > 0 && (
@@ -649,42 +1173,102 @@ export const AdminDataManagement: React.FC = () => {
                     </div>
                   )}
 
-                  {/* Preview - mobile cards */}
-                  {excelParseResult.rows.length > 0 && (
+                  {/* Row Previews */}
+                  {excelParseResult.previewSummary.validRows > 0 && (
                     <div>
                       <h5 className="text-xs font-bold text-slate-300 mb-2">
-                        Preview (first 10)
+                        Sample Records (first 10 of {excelParseResult.previewSummary.validRows})
                       </h5>
                       <div className="space-y-2 max-h-72 overflow-y-auto">
-                        {excelParseResult.rows.slice(0, 10).map((r, idx) => (
-                          <div
-                            key={idx}
-                            className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs"
-                          >
-                            <div className="font-semibold text-white truncate mb-1">
-                              {r.productName}
+                        {excelParseResult.format === 'SIMPLE_4_COL' &&
+                          excelParseResult.simpleRows.slice(0, 10).map((r, idx) => (
+                            <div
+                              key={idx}
+                              className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs"
+                            >
+                              <div className="font-semibold text-white truncate mb-1">
+                                {r.productName}
+                              </div>
+                              <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+                                <span>Buy: {r.buyingPrice.toLocaleString()}</span>
+                                <span className="text-emerald-400 font-bold">
+                                  Sell: {r.sellingPrice.toLocaleString()}
+                                </span>
+                                <span className="text-blue-300">Qty: {r.quantity}</span>
+                              </div>
                             </div>
-                            <div className="flex items-center justify-between text-[11px] text-slate-400">
-                              <span className="font-mono">
-                                Buy: <span className="text-slate-300">{r.buyingPrice.toLocaleString()}</span>
-                              </span>
-                              <span className="font-mono">
-                                Sell: <span className="text-emerald-400 font-bold">{r.sellingPrice.toLocaleString()}</span>
-                              </span>
-                              <span className="font-mono">
-                                Qty: <span className="text-blue-300">{r.quantity}</span>
-                              </span>
+                          ))}
+
+                        {excelParseResult.format === 'SONKO_19_COL' &&
+                          excelParseResult.sonkoRows.slice(0, 10).map((r, idx) => (
+                            <div
+                              key={idx}
+                              className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs space-y-1"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-white truncate">
+                                  {r.productName}
+                                  {r.variation ? ` (${r.variation})` : ''}
+                                </span>
+                                <span className="px-1.5 py-0.2 rounded bg-blue-500/15 text-blue-300 text-[10px] font-semibold shrink-0">
+                                  {r.location}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between flex-wrap gap-2 text-[11px] text-slate-400 font-mono">
+                                <span>{r.sku || 'No SKU'} · {r.categoryName || 'Uncategorized'}</span>
+                                <span>
+                                  Buy {r.unitPurchasePrice.toLocaleString()} →{' '}
+                                  <strong className="text-emerald-400">
+                                    {r.unitSellingPrice.toLocaleString()}
+                                  </strong>{' '}
+                                  · Qty <strong className="text-blue-300">{r.currentStock}</strong>
+                                </span>
+                              </div>
                             </div>
-                          </div>
-                        ))}
-                        {excelParseResult.rows.length > 10 && (
-                          <p className="text-[11px] text-slate-500 text-center pt-1">
-                            ... and {excelParseResult.rows.length - 10} more rows
-                          </p>
-                        )}
+                          ))}
+
+                        {excelParseResult.format === 'DETAILED_SALES_HISTORY' &&
+                          excelParseResult.detailedSaleRows.slice(0, 10).map((r, idx) => (
+                            <div
+                              key={idx}
+                              className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-white truncate">
+                                  #{r.receiptNumber} · {r.productName}
+                                </span>
+                                <span className="text-[10px] text-slate-400 font-mono">
+                                  {r.saleDateIso.slice(0, 10)}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-400 font-mono mt-0.5">
+                                {r.quantity} × {r.unitPrice.toLocaleString()} ({r.paymentMethod})
+                              </div>
+                            </div>
+                          ))}
                       </div>
                     </div>
                   )}
+
+                  {/* Commit CTA */}
+                  {excelParseResult.previewSummary.validRows > 0 &&
+                    !excelParseResult.needsManualMapping && (
+                      <button
+                        type="button"
+                        onClick={handleCommitExcelImport}
+                        disabled={isCommitting}
+                        className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white text-xs font-semibold py-3 rounded-xl shadow-sm transition disabled:opacity-50"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>
+                          {isCommitting
+                            ? 'Importing...'
+                            : `Confirm & Import (${excelParseResult.previewSummary.validRows} records) to ${
+                                shops.find(s => s.id === excelShopId)?.name || 'Shop'
+                              }`}
+                        </span>
+                      </button>
+                    )}
                 </div>
               )}
             </div>
@@ -827,16 +1411,29 @@ export const AdminDataManagement: React.FC = () => {
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-semibold text-white truncate">{item.fileName}</span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 shrink-0">
-                          {item.dataType}
-                        </span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {item.format && (
+                            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300">
+                              {item.format}
+                            </span>
+                          )}
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                            {item.dataType}
+                          </span>
+                        </div>
                       </div>
                       <div className="flex items-center justify-between text-[11px] text-slate-400">
                         <span>
                           Success: <b className="text-emerald-400">{item.successCount}</b>/{item.totalRecords}
                         </span>
-                        <span>+{item.createdCount} / ⟳{item.updatedCount}</span>
+                        <span>
+                          +{item.createdCount || 0} / ⟳{item.updatedCount || 0}
+                          {item.skippedCount ? ` / ⏭${item.skippedCount}` : ''}
+                        </span>
                       </div>
+                      {item.notes && (
+                        <div className="text-[10px] text-slate-400 truncate">{item.notes}</div>
+                      )}
                       <div className="flex items-center justify-between text-[10px] text-slate-500 pt-1 border-t border-slate-900">
                         <span>By: {item.importedByName}</span>
                         <span className="font-mono">{formatDateTime(item.createdAt)}</span>

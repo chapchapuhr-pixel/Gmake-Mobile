@@ -27,7 +27,7 @@ import {
 // ─────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────
-type ReportPeriod = 'today' | 'week' | 'month' | 'custom';
+type ReportPeriod = 'today' | 'week' | 'month' | 'year' | 'custom';
 
 interface DeviationRow {
   saleId: string;
@@ -67,6 +67,10 @@ function computeRange(period: ReportPeriod, customFrom: string, customTo: string
   if (period === 'month') {
     const past = new Date(now.getFullYear(), now.getMonth(), 1);
     return { from: past.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) };
+  }
+  if (period === 'year') {
+    const startOfYear = new Date(now.getFullYear(), 0, 1);
+    return { from: startOfYear.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) };
   }
   return { from: customFrom || undefined, to: customTo || undefined };
 }
@@ -134,6 +138,7 @@ const MobileSectionHeader: React.FC<{
             { id: 'today', label: 'Day' },
             { id: 'week', label: 'Week' },
             { id: 'month', label: 'Month' },
+            { id: 'year', label: 'Year' },
             { id: 'custom', label: 'Custom' },
           ].map(p => (
             <button

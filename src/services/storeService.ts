@@ -101,6 +101,7 @@ export class StoreService {
       name: cleanName,
       location: params.location?.trim() || undefined,
       status: params.status || 'ACTIVE',
+      isShopFloor: Boolean((params as any).isShopFloor),
       createdAt: now,
       updatedAt: now,
     };
@@ -195,6 +196,10 @@ export class StoreService {
       location:
         updates.location !== undefined ? updates.location.trim() || undefined : current.location,
       status: updates.status || current.status,
+      isShopFloor:
+        (updates as any).isShopFloor !== undefined
+          ? Boolean((updates as any).isShopFloor)
+          : current.isShopFloor,
       updatedAt: now,
     };
 
@@ -282,24 +287,89 @@ export class StoreService {
       return { success: false, error: 'Transfer quantity must be greater than 0.' };
     }
 
-    const availableStoreStock = Number(product.storeStock || 0);
-    if (qty > availableStoreStock) {
+    if (store.isShopFloor) {
       return {
         success: false,
-        error: `Not enough stock in store. Available: ${availableStoreStock} ${product.unit || 'pcs'}.`,
+        error: `"${store.name}" is already designated as the POS Shop Floor. Select a warehouse store to transfer from.`,
+      };
+    }
+
+    const availableInThisStore =
+      product.storeStocks && product.storeStocks[store.id] !== undefined
+        ? Number(product.storeStocks[store.id] || 0)
+        : Number(product.storeStock || 0);
+
+    if (qty > availableInThisStore) {
+      return {
+        success: false,
+        error: `Not enough stock in ${store.name}. Available: ${availableInThisStore} ${product.unit || 'pcs'}.`,
       };
     }
 
     const now = new Date().toISOString();
     const transferId = generateUUID();
     const currentShopStock = Number(product.currentStock || 0);
+    const totalWarehouseBefore = Number(product.storeStock || 0);
     const newShopStock = currentShopStock + qty;
-    const newStoreStock = availableStoreStock - qty;
+
+    // Update per-store stock breakdown cleanly if tracked
+    const allStores = db.getStores();
+    const floorStore = allStores.find(
+      s => s.shopId === destShop.id && s.isShopFloor && s.status === 'ACTIVE'
+    );
+    const nextStoreStocks = product.storeStocks ? { ...product.storeStocks } : undefined;
+    const nextStoreDetails = product.storeDetails ? { ...product.storeDetails } : undefined;
+
+    let newWarehouseTotal = Math.max(0, totalWarehouseBefore - qty);
+    let newStoreBalForLog = Math.max(0, availableInThisStore - qty);
+
+    if (nextStoreStocks) {
+      const currentInSource =
+        nextStoreStocks[store.id] !== undefined
+          ? Number(nextStoreStocks[store.id] || 0)
+          : availableInThisStore;
+      newStoreBalForLog = Math.max(0, currentInSource - qty);
+      nextStoreStocks[store.id] = newStoreBalForLog;
+
+      if (nextStoreDetails && nextStoreDetails[store.id]) {
+        nextStoreDetails[store.id] = {
+          ...nextStoreDetails[store.id],
+          quantity: newStoreBalForLog,
+        };
+      }
+
+      if (floorStore) {
+        nextStoreStocks[floorStore.id] = newShopStock;
+        if (nextStoreDetails) {
+          nextStoreDetails[floorStore.id] = {
+            ...(nextStoreDetails[floorStore.id] || {
+              storeId: floorStore.id,
+              storeName: floorStore.name,
+              unitPurchasePrice: product.purchasePrice || 0,
+              unitSellingPrice: product.sellingPrice || 0,
+            }),
+            storeId: floorStore.id,
+            storeName: floorStore.name,
+            quantity: newShopStock,
+          };
+        }
+      }
+
+      // Recompute warehouse total from all non-floor stores
+      const floorStoreIds = new Set(
+        allStores.filter(s => s.isShopFloor).map(s => s.id)
+      );
+      newWarehouseTotal = Object.entries(nextStoreStocks).reduce((sum, [sid, q]) => {
+        return floorStoreIds.has(sid) ? sum : sum + Math.max(0, Number(q || 0));
+      }, 0);
+    }
 
     products[prodIdx] = {
       ...product,
       currentStock: newShopStock,
-      storeStock: newStoreStock,
+      storeStock: newWarehouseTotal,
+      ...(nextStoreStocks ? { storeStocks: nextStoreStocks } : {}),
+      ...(nextStoreDetails ? { storeDetails: nextStoreDetails } : {}),
       updatedAt: now,
     };
     db.saveProducts(products);
@@ -330,9 +400,9 @@ export class StoreService {
       storeId: store.id,
       productId: product.id,
       productName: product.name,
-      previousQty: availableStoreStock,
+      previousQty: availableInThisStore,
       changeQty: -qty,
-      newQty: newStoreStock,
+      newQty: newStoreBalForLog,
       type: 'STORE_TRANSFER',
       reason: `Transferred OUT to ${destShop.name}${noteSuffix}`,
       referenceId: transferId,
@@ -377,5 +447,44 @@ export class StoreService {
     });
 
     return { success: true, transferId };
+  }
+
+  /**
+   * Synchronize a product's shop-floor quantity into its `storeStocks` / `storeDetails`
+   * map when a store in that shop is designated as `isShopFloor` (e.g. SONKO SOUND SHOP).
+   */
+  public static applyFloorStockDeltaToProduct<T extends { shopId: string; storeStocks?: Record<string, number>; storeDetails?: Record<string, any> }>(
+    product: T,
+    newFloorQty: number
+  ): T {
+    if (!product.storeStocks) return product;
+    const floorStore = db
+      .getStores()
+      .find(s => s.shopId === product.shopId && s.isShopFloor && s.status === 'ACTIVE');
+    if (!floorStore) return product;
+
+    const nextStoreStocks = {
+      ...product.storeStocks,
+      [floorStore.id]: Math.max(0, newFloorQty),
+    };
+    const nextStoreDetails = product.storeDetails
+      ? {
+          ...product.storeDetails,
+          ...(product.storeDetails[floorStore.id]
+            ? {
+                [floorStore.id]: {
+                  ...product.storeDetails[floorStore.id],
+                  quantity: Math.max(0, newFloorQty),
+                },
+              }
+            : {}),
+        }
+      : undefined;
+
+    return {
+      ...product,
+      storeStocks: nextStoreStocks,
+      ...(nextStoreDetails ? { storeDetails: nextStoreDetails } : {}),
+    };
   }
 }

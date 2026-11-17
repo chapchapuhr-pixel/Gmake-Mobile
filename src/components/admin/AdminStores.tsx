@@ -12,22 +12,26 @@ import {
   Edit3,
   Power,
   X,
+  Layers,
+  Tag,
+  History,
+  Eye,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { StoreService } from '../../services/storeService';
-import { formatDateTime } from '../../utils/formatters';
+import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import {
   getAdminManagedShops,
   hasAdminAccess,
   isPlatformAdmin,
   isShopAdmin,
 } from '../../utils/permissions';
-import type { Store } from '../../types';
+import type { Product, Store } from '../../types';
 
 export const AdminStores: React.FC = () => {
   const { currentUser, dbState, addToast, selectedShopId } = useApp();
 
-  const [activeSubTab, setActiveSubTab] = useState<'stores' | 'transfer'>('stores');
+  const [activeSubTab, setActiveSubTab] = useState<'stores' | 'inventory' | 'transfer'>('stores');
 
   // Create Store Modal / Form state
   const [isStoreModalOpen, setIsStoreModalOpen] = useState(false);
@@ -41,6 +45,12 @@ export const AdminStores: React.FC = () => {
   const [shopFilter, setShopFilter] = useState('ALL');
   const [storeSearch, setStoreSearch] = useState('');
 
+  // Store Inventory Browser state
+  const [selectedInventoryStoreId, setSelectedInventoryStoreId] = useState('ALL_COMBINED');
+  const [invSearch, setInvSearch] = useState('');
+  const [invCategoryFilter, setInvCategoryFilter] = useState('ALL');
+  const [invStockedOnly, setInvStockedOnly] = useState(true);
+
   // Transfer Stock Form state
   const [sourceStoreId, setSourceStoreId] = useState('');
   const [transferProductId, setTransferProductId] = useState('');
@@ -52,6 +62,7 @@ export const AdminStores: React.FC = () => {
 
   if (!currentUser || !hasAdminAccess(currentUser)) return null;
 
+  const settings = dbState.settings;
   const platformAdmin = isPlatformAdmin(currentUser);
   const shopAdmin = isShopAdmin(currentUser);
   const allShops = dbState.shops || [];
@@ -80,6 +91,55 @@ export const AdminStores: React.FC = () => {
     [accessibleStores]
   );
 
+  const transferableStores = useMemo(
+    () => activeStores.filter(st => !st.isShopFloor),
+    [activeStores]
+  );
+
+  const accessibleCategories = useMemo(
+    () =>
+      (dbState.categories || []).filter(
+        c => platformAdmin || accessibleShopIdSet.has(c.shopId)
+      ),
+    [dbState.categories, platformAdmin, accessibleShopIdSet]
+  );
+
+  const accessibleProducts = useMemo(
+    () =>
+      (dbState.products || []).filter(
+        p => p.status !== 'INACTIVE' && (platformAdmin || accessibleShopIdSet.has(p.shopId))
+      ),
+    [dbState.products, platformAdmin, accessibleShopIdSet]
+  );
+
+  const getProductQtyInStore = (product: Product, store: Store): number => {
+    if (product.storeStocks && product.storeStocks[store.id] !== undefined) {
+      return Number(product.storeStocks[store.id] || 0);
+    }
+    if (store.isShopFloor) {
+      return Number(product.currentStock || 0);
+    }
+    const nonFloorInShop = accessibleStores.filter(
+      s => s.shopId === product.shopId && !s.isShopFloor && s.status === 'ACTIVE'
+    );
+    if (nonFloorInShop.length <= 1 && (!product.storeStocks || Object.keys(product.storeStocks).length === 0)) {
+      return Number(product.storeStock || 0);
+    }
+    return 0;
+  };
+
+  const getProductTotalTrackedUnits = (product: Product): number => {
+    if (product.storeStocks && Object.keys(product.storeStocks).length > 0) {
+      const mappedStores = Object.entries(product.storeStocks);
+      const mappedTotal = mappedStores.reduce((s, [, qty]) => s + Number(qty || 0), 0);
+      const hasFloorMapped = mappedStores.some(([sid]) =>
+        accessibleStores.find(st => st.id === sid)?.isShopFloor
+      );
+      return hasFloorMapped ? mappedTotal : mappedTotal + Number(product.currentStock || 0);
+    }
+    return Number(product.currentStock || 0) + Number(product.storeStock || 0);
+  };
+
   const filteredStores = useMemo(() => {
     return accessibleStores.filter(st => {
       if (shopFilter !== 'ALL' && st.shopId !== shopFilter) return false;
@@ -96,15 +156,15 @@ export const AdminStores: React.FC = () => {
     });
   }, [accessibleStores, shopFilter, storeSearch, accessibleShops]);
 
-  // Resolve effective source store for transfer tab
+  // Resolve effective source store for transfer tab (prefer warehouse stores, not POS floor)
   const effectiveSourceStoreId =
-    sourceStoreId && activeStores.some(s => s.id === sourceStoreId)
+    sourceStoreId && transferableStores.some(s => s.id === sourceStoreId)
       ? sourceStoreId
-      : activeStores[0]?.id || '';
+      : transferableStores[0]?.id || '';
 
   const selectedSourceStore = useMemo(
-    () => activeStores.find(s => s.id === effectiveSourceStoreId),
-    [activeStores, effectiveSourceStoreId]
+    () => transferableStores.find(s => s.id === effectiveSourceStoreId),
+    [transferableStores, effectiveSourceStoreId]
   );
 
   const effectiveDestShopId =
@@ -112,12 +172,11 @@ export const AdminStores: React.FC = () => {
       ? destShopId
       : selectedSourceStore?.shopId || accessibleShops[0]?.id || '';
 
-  // Products belonging to the selected store's shop (with storeStock > 0 listed first)
+  // Products belonging to the selected store's shop (with available qty in selected source store first)
   const storeScopedProducts = useMemo(() => {
-    const base = (dbState.products || []).filter(p => {
-      if (p.status === 'INACTIVE') return false;
+    const base = accessibleProducts.filter(p => {
       if (selectedSourceStore) return p.shopId === selectedSourceStore.shopId;
-      return platformAdmin || accessibleShopIdSet.has(p.shopId);
+      return true;
     });
 
     const filtered = productSearch.trim()
@@ -125,18 +184,23 @@ export const AdminStores: React.FC = () => {
           const q = productSearch.trim().toLowerCase();
           return (
             p.name.toLowerCase().includes(q) ||
+            (p.variation || '').toLowerCase().includes(q) ||
             (p.sku || '').toLowerCase().includes(q) ||
             (p.barcode || '').toLowerCase().includes(q)
           );
         })
       : base;
 
-    return [...filtered].sort((a, b) => (b.storeStock || 0) - (a.storeStock || 0));
-  }, [dbState.products, selectedSourceStore, platformAdmin, accessibleShopIdSet, productSearch]);
+    return [...filtered].sort((a, b) => {
+      const aQty = selectedSourceStore ? getProductQtyInStore(a, selectedSourceStore) : Number(a.storeStock || 0);
+      const bQty = selectedSourceStore ? getProductQtyInStore(b, selectedSourceStore) : Number(b.storeStock || 0);
+      return bQty - aQty;
+    });
+  }, [accessibleProducts, selectedSourceStore, productSearch, accessibleStores]);
 
   const selectedTransferProduct = useMemo(
-    () => storeScopedProducts.find(p => p.id === transferProductId) || (dbState.products || []).find(p => p.id === transferProductId),
-    [storeScopedProducts, dbState.products, transferProductId]
+    () => storeScopedProducts.find(p => p.id === transferProductId) || accessibleProducts.find(p => p.id === transferProductId),
+    [storeScopedProducts, accessibleProducts, transferProductId]
   );
 
   // Recent store transfer & warehouse initial stock movements
@@ -152,16 +216,98 @@ export const AdminStores: React.FC = () => {
 
   // Summary metrics
   const totalStoreStockUnits = useMemo(() => {
-    return (dbState.products || [])
-      .filter(p => platformAdmin || accessibleShopIdSet.has(p.shopId))
-      .reduce((sum, p) => sum + Number(p.storeStock || 0), 0);
-  }, [dbState.products, platformAdmin, accessibleShopIdSet]);
+    return accessibleProducts.reduce((sum, p) => sum + Number(p.storeStock || 0), 0);
+  }, [accessibleProducts]);
 
   const productsInStoreCount = useMemo(() => {
-    return (dbState.products || []).filter(
-      p => (platformAdmin || accessibleShopIdSet.has(p.shopId)) && (p.storeStock || 0) > 0
-    ).length;
-  }, [dbState.products, platformAdmin, accessibleShopIdSet]);
+    return accessibleProducts.filter(p => (p.storeStock || 0) > 0).length;
+  }, [accessibleProducts]);
+
+  // Store Inventory Browser derived data
+  const selectedInventoryStore = useMemo(
+    () =>
+      selectedInventoryStoreId === 'ALL_COMBINED'
+        ? undefined
+        : accessibleStores.find(st => st.id === selectedInventoryStoreId),
+    [accessibleStores, selectedInventoryStoreId]
+  );
+
+  const inventoryProducts = useMemo(() => {
+    return accessibleProducts.filter(p => {
+      if (selectedInventoryStore && p.shopId !== selectedInventoryStore.shopId) {
+        return false;
+      }
+      if (invCategoryFilter !== 'ALL' && p.categoryId !== invCategoryFilter) {
+        return false;
+      }
+      if (selectedInventoryStore && invStockedOnly) {
+        const qtyHere = getProductQtyInStore(p, selectedInventoryStore);
+        const hasDetailsHere = Boolean(p.storeDetails?.[selectedInventoryStore.id]);
+        if (qtyHere <= 0 && !hasDetailsHere) return false;
+      }
+      if (invSearch.trim()) {
+        const q = invSearch.trim().toLowerCase();
+        const cf = p.customFields;
+        const customMatch = cf
+          ? [cf.field1, cf.field2, cf.field3, cf.field4].some(v =>
+              (v || '').toLowerCase().includes(q)
+            )
+          : false;
+        return (
+          p.name.toLowerCase().includes(q) ||
+          (p.variation || '').toLowerCase().includes(q) ||
+          (p.sku || '').toLowerCase().includes(q) ||
+          (p.barcode || '').toLowerCase().includes(q) ||
+          customMatch
+        );
+      }
+      return true;
+    });
+  }, [
+    accessibleProducts,
+    selectedInventoryStore,
+    invCategoryFilter,
+    invStockedOnly,
+    invSearch,
+    accessibleStores,
+  ]);
+
+  const inventoryTotals = useMemo(() => {
+    let totalUnits = 0;
+    let totalCostValue = 0;
+    let totalSaleValue = 0;
+
+    for (const p of inventoryProducts) {
+      if (selectedInventoryStore) {
+        const qty = getProductQtyInStore(p, selectedInventoryStore);
+        const detail = p.storeDetails?.[selectedInventoryStore.id];
+        totalUnits += qty;
+        totalCostValue +=
+          detail?.purchaseValue !== undefined ? detail.purchaseValue : qty * (p.purchasePrice || 0);
+        totalSaleValue +=
+          detail?.saleValue !== undefined ? detail.saleValue : qty * (p.sellingPrice || 0);
+      } else {
+        const qty = getProductTotalTrackedUnits(p);
+        totalUnits += qty;
+        totalCostValue +=
+          p.importedPurchaseValue !== undefined
+            ? p.importedPurchaseValue
+            : qty * (p.purchasePrice || 0);
+        totalSaleValue +=
+          p.importedSaleValue !== undefined
+            ? p.importedSaleValue
+            : qty * (p.sellingPrice || 0);
+      }
+    }
+
+    return {
+      skuCount: inventoryProducts.length,
+      totalUnits,
+      totalCostValue,
+      totalSaleValue,
+      potentialProfit: totalSaleValue - totalCostValue,
+    };
+  }, [inventoryProducts, selectedInventoryStore, accessibleStores]);
 
   // Modal handlers
   const openCreateStoreModal = () => {
@@ -262,6 +408,11 @@ export const AdminStores: React.FC = () => {
     setTransferError('');
   };
 
+  const availableQtyForSelected =
+    selectedTransferProduct && selectedSourceStore
+      ? getProductQtyInStore(selectedTransferProduct, selectedSourceStore)
+      : Number(selectedTransferProduct?.storeStock || 0);
+
   const handleSubmitTransfer = (e: React.FormEvent) => {
     e.preventDefault();
     setTransferError('');
@@ -276,7 +427,7 @@ export const AdminStores: React.FC = () => {
     }
 
     const qty = Number(transferQty);
-    const available = Number(selectedTransferProduct.storeStock || 0);
+    const available = availableQtyForSelected;
     if (!Number.isFinite(qty) || qty <= 0) {
       setTransferError('Enter a valid quantity greater than 0.');
       return;
@@ -319,7 +470,6 @@ export const AdminStores: React.FC = () => {
     }
   };
 
-  const availableQtyForSelected = Number(selectedTransferProduct?.storeStock || 0);
   const parsedQty = Number(transferQty);
   const isQtyExceeding =
     Boolean(selectedTransferProduct) &&
@@ -343,7 +493,7 @@ export const AdminStores: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs">
+          <div className="flex bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs overflow-x-auto">
             <button
               type="button"
               onClick={() => setActiveSubTab('stores')}
@@ -355,6 +505,18 @@ export const AdminStores: React.FC = () => {
             >
               <Warehouse className="w-3.5 h-3.5" />
               <span>Stores ({accessibleStores.length})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveSubTab('inventory')}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap ${
+                activeSubTab === 'inventory'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Package className="w-3.5 h-3.5" />
+              <span>Inventory</span>
             </button>
             <button
               type="button"
@@ -466,11 +628,11 @@ export const AdminStores: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {filteredStores.map(store => {
                 const shop = accessibleShops.find(s => s.id === store.shopId);
-                const shopProductsWithWarehouseStock = (dbState.products || []).filter(
-                  p => p.shopId === store.shopId && (p.storeStock || 0) > 0
+                const storeStockedProducts = accessibleProducts.filter(
+                  p => p.shopId === store.shopId && getProductQtyInStore(p, store) > 0
                 );
-                const shopWarehouseUnits = shopProductsWithWarehouseStock.reduce(
-                  (sum, p) => sum + Number(p.storeStock || 0),
+                const storeTotalUnits = storeStockedProducts.reduce(
+                  (sum, p) => sum + getProductQtyInStore(p, store),
                   0
                 );
                 const isActive = store.status === 'ACTIVE';
@@ -488,9 +650,16 @@ export const AdminStores: React.FC = () => {
                           <Warehouse className="w-4 h-4" />
                         </div>
                         <div className="min-w-0">
-                          <h3 className="text-sm font-bold text-white truncate">
-                            {store.name}
-                          </h3>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h3 className="text-sm font-bold text-white truncate">
+                              {store.name}
+                            </h3>
+                            {store.isShopFloor && (
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[9px] font-bold">
+                                POS Floor
+                              </span>
+                            )}
+                          </div>
                           <div className="flex items-center flex-wrap gap-x-2 gap-y-0.5 text-[11px] text-slate-400 mt-0.5">
                             <span className="inline-flex items-center gap-1 text-slate-300">
                               <StoreIcon className="w-3 h-3 text-slate-500" />
@@ -518,21 +687,33 @@ export const AdminStores: React.FC = () => {
 
                     <div className="grid grid-cols-2 gap-2 text-xs bg-slate-950/70 border border-slate-800/80 rounded-lg p-2.5">
                       <div>
-                        <div className="text-[10px] text-slate-500">Shop Warehouse SKUs</div>
+                        <div className="text-[10px] text-slate-500">Store SKUs</div>
                         <div className="font-mono font-semibold text-white tabular-nums mt-0.5">
-                          {shopProductsWithWarehouseStock.length}
+                          {storeStockedProducts.length}
                         </div>
                       </div>
                       <div>
-                        <div className="text-[10px] text-slate-500">Total Warehouse Units</div>
+                        <div className="text-[10px] text-slate-500">Total Units</div>
                         <div className="font-mono font-semibold text-blue-400 tabular-nums mt-0.5">
-                          {shopWarehouseUnits.toLocaleString()}
+                          {storeTotalUnits.toLocaleString()}
                         </div>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 pt-1 border-t border-slate-800/80 text-xs">
-                      {isActive && (
+                    <div className="flex items-center flex-wrap gap-2 pt-1 border-t border-slate-800/80 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedInventoryStoreId(store.id);
+                          setInvStockedOnly(true);
+                          setActiveSubTab('inventory');
+                        }}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-300 font-semibold transition"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>View Inventory</span>
+                      </button>
+                      {isActive && !store.isShopFloor && (
                         <button
                           type="button"
                           onClick={() => {
@@ -542,7 +723,7 @@ export const AdminStores: React.FC = () => {
                           className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-blue-600/15 hover:bg-blue-600/25 text-blue-300 font-semibold transition"
                         >
                           <ArrowRightLeft className="w-3.5 h-3.5" />
-                          <span>Transfer Stock</span>
+                          <span>Transfer</span>
                         </button>
                       )}
                       <button
@@ -574,15 +755,318 @@ export const AdminStores: React.FC = () => {
         </div>
       )}
 
-      {/* SUB-TAB 2: TRANSFER STOCK (STORE -> SHOP FLOOR) */}
+      {/* SUB-TAB 2: STORE INVENTORY BROWSER */}
+      {activeSubTab === 'inventory' && (
+        <div className="space-y-4">
+          {/* Store Filter & Search */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2.5 text-xs">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-400 uppercase mb-1">
+                  Select Store View
+                </label>
+                <select
+                  value={selectedInventoryStoreId}
+                  onChange={e => setSelectedInventoryStoreId(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="ALL_COMBINED">
+                    All Stores Combined (Comparison)
+                  </option>
+                  {accessibleStores.map(st => {
+                    const sh = accessibleShops.find(s => s.id === st.shopId);
+                    return (
+                      <option key={st.id} value={st.id}>
+                        {st.name}
+                        {st.isShopFloor ? ' (POS Floor)' : ''} — {sh?.name || 'Shop'}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-400 uppercase mb-1">
+                  Category Filter
+                </label>
+                <select
+                  value={invCategoryFilter}
+                  onChange={e => setInvCategoryFilter(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="ALL">All Categories</option>
+                  {accessibleCategories.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-400 uppercase mb-1">
+                  Search Product / Variation / Custom Field
+                </label>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    value={invSearch}
+                    onChange={e => setInvSearch(e.target.value)}
+                    placeholder="Name, SKU, variation, custom field..."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {selectedInventoryStore && (
+              <div className="flex items-center justify-between pt-1 border-t border-slate-800/70">
+                <span className="text-[11px] text-slate-400">
+                  Viewing{' '}
+                  <strong className="text-white">{selectedInventoryStore.name}</strong>
+                  {selectedInventoryStore.isShopFloor ? ' (POS Sellable Floor)' : ' (Warehouse)'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setInvStockedOnly(v => !v)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition ${
+                    invStockedOnly
+                      ? 'bg-blue-600/20 border-blue-500/40 text-blue-300'
+                      : 'bg-slate-950 border-slate-800 text-slate-400'
+                  }`}
+                >
+                  {invStockedOnly ? 'Stocked Here Only' : 'Show All Shop Items'}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Store-Scoped Inventory KPIs */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-[10px] text-slate-400 font-semibold uppercase">SKUs</div>
+              <div className="text-base sm:text-lg font-bold text-white font-mono tabular-nums mt-0.5">
+                {inventoryTotals.skuCount}
+              </div>
+              <div className="text-[10px] text-slate-500 font-mono tabular-nums">
+                {inventoryTotals.totalUnits.toLocaleString()} units
+              </div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-[10px] text-slate-400 font-semibold uppercase">Cost Value</div>
+              <div className="text-sm sm:text-base font-bold text-purple-300 font-mono tabular-nums mt-0.5 truncate">
+                {formatCurrency(inventoryTotals.totalCostValue, settings.currencySymbol)}
+              </div>
+              <div className="text-[10px] text-slate-500">Purchase basis</div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-[10px] text-slate-400 font-semibold uppercase">Sale Value</div>
+              <div className="text-sm sm:text-base font-bold text-blue-300 font-mono tabular-nums mt-0.5 truncate">
+                {formatCurrency(inventoryTotals.totalSaleValue, settings.currencySymbol)}
+              </div>
+              <div className="text-[10px] text-slate-500">Retail basis</div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-[10px] text-slate-400 font-semibold uppercase">Potential Profit</div>
+              <div className="text-sm sm:text-base font-bold text-emerald-400 font-mono tabular-nums mt-0.5 truncate">
+                {formatCurrency(inventoryTotals.potentialProfit, settings.currencySymbol)}
+              </div>
+              <div className="text-[10px] text-slate-500">Est. margin</div>
+            </div>
+          </div>
+
+          {/* Inventory List */}
+          {inventoryProducts.length === 0 ? (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl py-12 px-4 text-center">
+              <Package className="w-10 h-10 mx-auto text-slate-600 mb-2" />
+              <p className="text-sm font-semibold text-white">No Products Found</p>
+              <p className="text-xs text-slate-400 mt-1">
+                Try clearing search/category filters or importing store stock in Data Management.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {inventoryProducts.slice(0, 150).map(product => {
+                const cat = accessibleCategories.find(c => c.id === product.categoryId);
+                const shopStores = accessibleStores.filter(st => st.shopId === product.shopId);
+                const storeQty = selectedInventoryStore
+                  ? getProductQtyInStore(product, selectedInventoryStore)
+                  : getProductTotalTrackedUnits(product);
+                const detail = selectedInventoryStore
+                  ? product.storeDetails?.[selectedInventoryStore.id]
+                  : undefined;
+                const costVal =
+                  detail?.purchaseValue !== undefined
+                    ? detail.purchaseValue
+                    : storeQty * (product.purchasePrice || 0);
+                const saleVal =
+                  detail?.saleValue !== undefined
+                    ? detail.saleValue
+                    : storeQty * (product.sellingPrice || 0);
+
+                const customEntries = product.customFields
+                  ? [
+                      product.customFields.field1 && `CF1: ${product.customFields.field1}`,
+                      product.customFields.field2 && `CF2: ${product.customFields.field2}`,
+                      product.customFields.field3 && `CF3: ${product.customFields.field3}`,
+                      product.customFields.field4 && `CF4: ${product.customFields.field4}`,
+                    ].filter(Boolean) as string[]
+                  : [];
+
+                const hasHistorical =
+                  (product.historicalUnitsSold || 0) > 0 ||
+                  (product.historicalUnitsTransferred || 0) > 0 ||
+                  (product.historicalUnitsAdjusted || 0) > 0;
+
+                return (
+                  <div
+                    key={product.id}
+                    className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2.5 text-xs"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <h4 className="font-bold text-white text-sm truncate">
+                            {product.name}
+                          </h4>
+                          {product.variation && (
+                            <span className="px-2 py-0.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 text-[10px] font-semibold inline-flex items-center gap-1">
+                              <Layers className="w-3 h-3" />
+                              {product.variation}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap text-[11px] text-slate-400 mt-1">
+                          <span className="font-mono">SKU: {product.sku}</span>
+                          {cat && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">
+                              <Tag className="w-2.5 h-2.5" />
+                              {cat.name}
+                            </span>
+                          )}
+                          {customEntries.map((cf, idx) => (
+                            <span
+                              key={idx}
+                              className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 text-[10px]"
+                            >
+                              {cf}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <div className="text-[10px] text-slate-400">
+                          {selectedInventoryStore ? selectedInventoryStore.name : 'All Stores'}
+                        </div>
+                        <div className="text-base font-bold font-mono tabular-nums text-blue-400">
+                          {storeQty} {product.unit}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Multi-Store Quantity Breakdown in Combined Mode */}
+                    {!selectedInventoryStore && (
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {shopStores.map(st => {
+                          const qtyHere = getProductQtyInStore(product, st);
+                          return (
+                            <button
+                              key={st.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedInventoryStoreId(st.id);
+                                setInvStockedOnly(true);
+                              }}
+                              className={`px-2 py-1 rounded-lg border text-[10px] font-mono tabular-nums transition ${
+                                qtyHere > 0
+                                  ? st.isShopFloor
+                                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
+                                    : 'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20'
+                                  : 'bg-slate-950 border-slate-800 text-slate-500'
+                              }`}
+                            >
+                              {st.name}
+                              {st.isShopFloor ? ' (Floor)' : ''}: <strong>{qtyHere}</strong>
+                            </button>
+                          );
+                        })}
+                        {shopStores.length === 0 && (
+                          <span className="px-2 py-1 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 text-[10px] font-mono">
+                            Floor: {product.currentStock} · Store: {product.storeStock || 0}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Prices & Valuations */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-950/60 border border-slate-800/80 rounded-lg p-2 text-[11px]">
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">Buy Price</span>
+                        <span className="font-mono text-slate-300">
+                          {formatCurrency(product.purchasePrice, settings.currencySymbol)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">Sell Price</span>
+                        <span className="font-mono font-semibold text-white">
+                          {formatCurrency(product.sellingPrice, settings.currencySymbol)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">Cost Value</span>
+                        <span className="font-mono text-purple-300">
+                          {formatCurrency(costVal, settings.currencySymbol)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">Sale Value</span>
+                        <span className="font-mono font-semibold text-emerald-400">
+                          {formatCurrency(saleVal, settings.currencySymbol)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Isolated Historical Reference Metadata */}
+                    {hasHistorical && (
+                      <div className="flex items-center justify-between flex-wrap gap-2 px-2.5 py-1.5 rounded-lg bg-amber-950/20 border border-amber-500/20 text-[10px] text-amber-200/90">
+                        <span className="inline-flex items-center gap-1 font-semibold">
+                          <History className="w-3 h-3 text-amber-400" />
+                          {product.historicalNote || 'Historical date unavailable'}
+                        </span>
+                        <span className="font-mono tabular-nums">
+                          Sold: {product.historicalUnitsSold || 0} · Transferred:{' '}
+                          {product.historicalUnitsTransferred || 0} · Adjusted:{' '}
+                          {product.historicalUnitsAdjusted || 0}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {inventoryProducts.length > 150 && (
+                <div className="text-center text-xs text-slate-500 py-2">
+                  Showing first 150 of {inventoryProducts.length} matching products. Refine search or filter by store/category.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* SUB-TAB 3: TRANSFER STOCK (STORE -> SHOP FLOOR) */}
       {activeSubTab === 'transfer' && (
         <div className="space-y-5">
-          {activeStores.length === 0 ? (
+          {transferableStores.length === 0 ? (
             <div className="bg-slate-900 border border-slate-800 rounded-xl py-12 px-4 text-center">
               <Warehouse className="w-10 h-10 mx-auto text-slate-600 mb-2.5" />
-              <h3 className="text-sm font-semibold text-white">No Active Stores Available</h3>
+              <h3 className="text-sm font-semibold text-white">No Active Warehouse Stores Available</h3>
               <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-                Create an active store first before transferring stock to a shop floor.
+                Create an active warehouse store (not a POS floor store) before transferring stock onto the shop floor.
               </p>
               <button
                 type="button"
@@ -622,7 +1106,7 @@ export const AdminStores: React.FC = () => {
                       required
                       className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                     >
-                      {activeStores.map(st => {
+                      {transferableStores.map(st => {
                         const sh = accessibleShops.find(s => s.id === st.shopId);
                         return (
                           <option key={st.id} value={st.id}>
@@ -654,7 +1138,7 @@ export const AdminStores: React.FC = () => {
                   </div>
                 </div>
 
-                {/* 3. Select Product (showing storeStock) */}
+                {/* 3. Select Product (showing storeStock in selected store) */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <label className="block text-slate-300 font-medium">
@@ -662,7 +1146,7 @@ export const AdminStores: React.FC = () => {
                     </label>
                     {selectedTransferProduct && (
                       <span className="text-[11px] font-mono tabular-nums text-blue-400">
-                        Available in Store: {availableQtyForSelected}{' '}
+                        Available in {selectedSourceStore?.name || 'Store'}: {availableQtyForSelected}{' '}
                         {selectedTransferProduct.unit || 'pcs'}
                       </span>
                     )}
@@ -674,7 +1158,7 @@ export const AdminStores: React.FC = () => {
                       type="text"
                       value={productSearch}
                       onChange={e => setProductSearch(e.target.value)}
-                      placeholder="Filter products by name, SKU, or barcode..."
+                      placeholder="Filter products by name, variation, SKU, or barcode..."
                       className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                     />
                   </div>
@@ -689,17 +1173,23 @@ export const AdminStores: React.FC = () => {
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                   >
                     <option value="">Choose a product...</option>
-                    {storeScopedProducts.map(p => (
-                      <option key={p.id} value={p.id}>
-                        {p.name} ({p.sku}) — Store: {p.storeStock || 0} {p.unit} · Floor:{' '}
-                        {p.currentStock} {p.unit}
-                      </option>
-                    ))}
+                    {storeScopedProducts.map(p => {
+                      const qtyHere = selectedSourceStore
+                        ? getProductQtyInStore(p, selectedSourceStore)
+                        : Number(p.storeStock || 0);
+                      return (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                          {p.variation ? ` [${p.variation}]` : ''} ({p.sku}) — Store: {qtyHere}{' '}
+                          {p.unit} · Floor: {p.currentStock} {p.unit}
+                        </option>
+                      );
+                    })}
                   </select>
 
                   {selectedTransferProduct && availableQtyForSelected <= 0 && (
                     <p className="text-[11px] text-amber-400">
-                      This product currently has 0 units in store stock. Record a purchase or add product stock to store first.
+                      This product currently has 0 units in {selectedSourceStore?.name || 'this store'}. Record a purchase or import stock to this store first.
                     </p>
                   )}
                 </div>

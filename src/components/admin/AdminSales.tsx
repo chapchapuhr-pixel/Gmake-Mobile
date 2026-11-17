@@ -28,7 +28,7 @@ import {
   isShopAdmin,
 } from '../../utils/permissions';
 
-type DatePreset = 'TODAY' | 'WEEK' | 'MONTH' | 'CUSTOM';
+type DatePreset = 'TODAY' | 'WEEK' | 'MONTH' | 'YEAR' | 'CUSTOM';
 
 export const AdminSales: React.FC = () => {
   const { currentUser, showReceipt, dbState, addToast } = useApp();
@@ -83,6 +83,11 @@ export const AdminSales: React.FC = () => {
 
     if (preset === 'MONTH') {
       const start = new Date(today.getFullYear(), today.getMonth(), 1);
+      return { start: toYMD(start), end: toYMD(today) };
+    }
+
+    if (preset === 'YEAR') {
+      const start = new Date(today.getFullYear(), 0, 1);
       return { start: toYMD(start), end: toYMD(today) };
     }
 
@@ -521,6 +526,12 @@ export const AdminSales: React.FC = () => {
       idleClass: 'bg-violet-500/10 border-violet-500/30 text-violet-300 hover:bg-violet-500/20',
     },
     {
+      id: 'YEAR',
+      label: 'Year',
+      activeClass: 'bg-cyan-600 border-cyan-500 text-white shadow-md shadow-cyan-500/30',
+      idleClass: 'bg-cyan-500/10 border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/20',
+    },
+    {
       id: 'CUSTOM',
       label: 'Custom',
       activeClass: 'bg-amber-500 border-amber-400 text-white shadow-md shadow-amber-500/30',
@@ -696,7 +707,7 @@ export const AdminSales: React.FC = () => {
               Period
             </span>
           </div>
-          <div className="grid grid-cols-4 gap-1.5">
+          <div className="grid grid-cols-5 gap-1.5">
             {presets.map(p => {
               const isActive = datePreset === p.id;
               return (

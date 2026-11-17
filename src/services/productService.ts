@@ -51,6 +51,7 @@ export class ProductService {
       products = products.filter(
         p =>
           p.name.toLowerCase().includes(q) ||
+          (p.variation || '').toLowerCase().includes(q) ||
           p.sku.toLowerCase().includes(q) ||
           p.barcode.toLowerCase().includes(q)
       );
@@ -136,6 +137,7 @@ export class ProductService {
       shopId: string;
       storeId?: string;
       name: string;
+      variation?: string;
       sku?: string;
       barcode?: string;
       categoryId: string;
@@ -236,12 +238,35 @@ export class ProductService {
 
     const initialQty = Math.max(0, Number(data.currentStock || 0));
     const isSentToStore = Boolean(data.storeId && targetStore);
+    const cleanVariation =
+      data.variation?.trim() && data.variation.trim().toUpperCase() !== 'DUMMY'
+        ? data.variation.trim()
+        : undefined;
+    const nowIso = new Date().toISOString();
+    const initialStoreStocks =
+      isSentToStore && data.storeId
+        ? { [data.storeId]: initialQty }
+        : undefined;
+    const initialStoreDetails =
+      isSentToStore && data.storeId && targetStore
+        ? {
+            [data.storeId]: {
+              storeId: data.storeId,
+              storeName: targetStore.name,
+              quantity: initialQty,
+              unitPurchasePrice: Number(data.purchasePrice || 0),
+              unitSellingPrice: Number(data.sellingPrice),
+              lastImportedAt: nowIso,
+            },
+          }
+        : undefined;
 
     const newProduct: Product = {
       id: productId,
       shopId: data.shopId,
       storeId: isSentToStore ? data.storeId : undefined,
       name: data.name.trim(),
+      ...(cleanVariation ? { variation: cleanVariation } : {}),
       sku: cleanSku,
       barcode: cleanBarcode,
       categoryId: data.categoryId || 'cat-supplies',
@@ -249,13 +274,15 @@ export class ProductService {
       purchasePrice: Number(data.purchasePrice || 0),
       currentStock: isSentToStore ? 0 : initialQty,
       storeStock: isSentToStore ? initialQty : 0,
+      ...(initialStoreStocks ? { storeStocks: initialStoreStocks } : {}),
+      ...(initialStoreDetails ? { storeDetails: initialStoreDetails } : {}),
       minStock: Number(data.minStock ?? 5),
       unit: data.unit?.trim() || 'pcs',
       status: data.status || 'ACTIVE',
       images: normalizedImages,
       imageUrl: mainImageUrl,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
     };
 
     const updated = [newProduct, ...products];

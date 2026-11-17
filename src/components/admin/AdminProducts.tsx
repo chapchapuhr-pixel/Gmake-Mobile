@@ -15,6 +15,8 @@ import {
   ChevronDown,
   ChevronRight,
   Loader2,
+  Layers,
+  History,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ProductService } from '../../services/productService';
@@ -57,6 +59,7 @@ export const AdminProducts: React.FC = () => {
   // Product Form Fields
   const [productShopId, setProductShopId] = useState('');
   const [name, setName] = useState('');
+  const [variation, setVariation] = useState('');
   const [sku, setSku] = useState('');
   const [barcode, setBarcode] = useState('');
   const [categoryId, setCategoryId] = useState('');
@@ -121,6 +124,7 @@ export const AdminProducts: React.FC = () => {
       const q = searchQuery.toLowerCase().trim();
       return (
         p.name.toLowerCase().includes(q) ||
+        (p.variation || '').toLowerCase().includes(q) ||
         p.sku.toLowerCase().includes(q) ||
         p.barcode.toLowerCase().includes(q)
       );
@@ -186,6 +190,7 @@ export const AdminProducts: React.FC = () => {
         : shops[0]?.id || '';
     setProductShopId(initialShopId);
     setName('');
+    setVariation('');
     setSku('');
     setBarcode('');
     const shopCats = categories.filter(c => c.shopId === initialShopId && c.status !== 'INACTIVE');
@@ -215,6 +220,7 @@ export const AdminProducts: React.FC = () => {
     const pShopId = p.shopId && visibleShopIdSet.has(p.shopId) ? p.shopId : shops[0]?.id || '';
     setProductShopId(pShopId);
     setName(p.name);
+    setVariation(p.variation || '');
     setSku(p.sku);
     setBarcode(p.barcode);
     setCategoryId(p.categoryId);
@@ -277,6 +283,7 @@ export const AdminProducts: React.FC = () => {
           {
             shopId: productShopId,
             name,
+            variation: variation.trim() || undefined,
             sku: sku.trim(),
             barcode: barcode.trim(),
             categoryId,
@@ -300,6 +307,7 @@ export const AdminProducts: React.FC = () => {
             shopId: productShopId,
             storeId: destinationType === 'STORE' ? selectedStoreId : undefined,
             name,
+            variation: variation.trim() || undefined,
             sku: sku.trim() || undefined,
             barcode: barcode.trim() || undefined,
             categoryId,
@@ -504,6 +512,12 @@ export const AdminProducts: React.FC = () => {
               <span className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-300">
                 {cat?.name || 'General'}
               </span>
+              {product.variation && (
+                <span className="px-1.5 py-0.2 rounded bg-violet-500/15 text-violet-300 border border-violet-500/25 inline-flex items-center gap-0.5 font-semibold">
+                  <Layers className="w-2.5 h-2.5" />
+                  {product.variation}
+                </span>
+              )}
               {product.sku && (
                 <span className="font-mono text-slate-400">SKU: {product.sku}</span>
               )}
@@ -546,6 +560,37 @@ export const AdminProducts: React.FC = () => {
             )}
           </div>
         </div>
+
+        {product.storeStocks && Object.keys(product.storeStocks).length > 0 && (
+          <div className="flex flex-wrap gap-1 text-[10px]">
+            {Object.entries(product.storeStocks).map(([sid, qty]) => {
+              const st = (dbState.stores || []).find(s => s.id === sid);
+              if (!st && !qty) return null;
+              return (
+                <span
+                  key={sid}
+                  className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-300 font-mono"
+                >
+                  {st?.name || 'Store'}: {qty}
+                </span>
+              );
+            })}
+          </div>
+        )}
+
+        {((product.historicalUnitsSold || 0) > 0 ||
+          (product.historicalUnitsTransferred || 0) > 0 ||
+          (product.historicalUnitsAdjusted || 0) > 0) && (
+          <div className="flex items-center justify-between gap-2 px-2 py-1 rounded bg-amber-950/20 border border-amber-500/20 text-[10px] text-amber-200/90">
+            <span className="inline-flex items-center gap-1">
+              <History className="w-3 h-3 text-amber-400" />
+              {product.historicalNote || 'Historical date unavailable'}
+            </span>
+            <span className="font-mono">
+              Sold: {product.historicalUnitsSold || 0}
+            </span>
+          </div>
+        )}
 
         <div className="flex items-center justify-between pt-1 border-t border-slate-800/60 text-xs">
           <div className="text-[11px] text-emerald-400 font-mono">
@@ -1183,18 +1228,32 @@ export const AdminProducts: React.FC = () => {
                 )}
               </div>
 
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">
-                  Product Title *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  placeholder="e.g. Bosch Hammer Drill 650W"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-slate-300 font-medium mb-1">
+                    Product Title *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={name}
+                    onChange={e => setName(e.target.value)}
+                    placeholder="e.g. Bosch Hammer Drill 650W"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-300 font-medium mb-1">
+                    Variation (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={variation}
+                    onChange={e => setVariation(e.target.value)}
+                    placeholder="e.g. 12 Inch, Black"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">

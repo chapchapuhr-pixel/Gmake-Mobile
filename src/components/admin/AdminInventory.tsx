@@ -14,6 +14,7 @@ import {
   ChevronDown,
   ChevronRight,
   Loader2,
+  Layers,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { InventoryService } from '../../services/inventoryService';
@@ -98,7 +99,11 @@ export const AdminInventory: React.FC = () => {
   const products = visibleProducts.filter(p => {
     const matchesShop = selectedShopId === 'ALL' || p.shopId === selectedShopId;
     const q = searchQuery.toLowerCase().trim();
-    const matchesSearch = !q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q);
+    const matchesSearch =
+      !q ||
+      p.name.toLowerCase().includes(q) ||
+      (p.variation || '').toLowerCase().includes(q) ||
+      p.sku.toLowerCase().includes(q);
     const matchesLowFilter = !showLowStockOnly || p.currentStock <= p.minStock;
     return matchesShop && matchesSearch && matchesLowFilter;
   });
@@ -529,7 +534,15 @@ export const AdminInventory: React.FC = () => {
               }}
             />
             <div className="min-w-0">
-              <h4 className="font-bold text-xs text-white truncate">{p.name}</h4>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <h4 className="font-bold text-xs text-white truncate">{p.name}</h4>
+                {p.variation && (
+                  <span className="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/25 text-[9px] font-semibold inline-flex items-center gap-0.5">
+                    <Layers className="w-2.5 h-2.5" />
+                    {p.variation}
+                  </span>
+                )}
+              </div>
               <p className="text-[10px] font-mono text-slate-400 mt-0.5">SKU: {p.sku}</p>
             </div>
           </div>
@@ -549,7 +562,9 @@ export const AdminInventory: React.FC = () => {
 
         <div className="grid grid-cols-3 gap-2 text-center text-xs">
           <div className="bg-slate-950/60 p-2 rounded-lg border border-slate-800">
-            <div className="text-[9px] text-slate-400">Stock</div>
+            <div className="text-[9px] text-slate-400">
+              {(p.storeStock || 0) > 0 ? 'Floor / Store' : 'Stock'}
+            </div>
             <div
               className={`font-mono text-[11px] font-bold ${
                 isOut ? 'text-rose-400' : isLow ? 'text-amber-300' : 'text-emerald-400'
@@ -557,6 +572,11 @@ export const AdminInventory: React.FC = () => {
             >
               {p.currentStock} {p.unit}
             </div>
+            {(p.storeStock || 0) > 0 && (
+              <div className="font-mono text-[10px] text-blue-400 mt-0.5">
+                Store: {p.storeStock} {p.unit}
+              </div>
+            )}
           </div>
           <div className="bg-slate-950/60 p-2 rounded-lg border border-slate-800">
             <div className="text-[9px] text-slate-400">Cost</div>
@@ -571,6 +591,37 @@ export const AdminInventory: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {p.storeStocks && Object.keys(p.storeStocks).length > 0 && (
+          <div className="flex flex-wrap gap-1 text-[10px]">
+            {Object.entries(p.storeStocks).map(([sid, qty]) => {
+              const st = (dbState.stores || []).find(s => s.id === sid);
+              return (
+                <span
+                  key={sid}
+                  className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-300 font-mono"
+                >
+                  {st?.name || 'Store'}: {qty}
+                </span>
+              );
+            })}
+          </div>
+        )}
+
+        {((p.historicalUnitsSold || 0) > 0 ||
+          (p.historicalUnitsTransferred || 0) > 0 ||
+          (p.historicalUnitsAdjusted || 0) > 0) && (
+          <div className="flex items-center justify-between gap-2 px-2 py-1 rounded bg-amber-950/20 border border-amber-500/20 text-[10px] text-amber-200/90">
+            <span className="inline-flex items-center gap-1">
+              <History className="w-3 h-3 text-amber-400" />
+              {p.historicalNote || 'Historical date unavailable'}
+            </span>
+            <span className="font-mono">
+              Sold: {p.historicalUnitsSold || 0} · Trf: {p.historicalUnitsTransferred || 0} · Adj:{' '}
+              {p.historicalUnitsAdjusted || 0}
+            </span>
+          </div>
+        )}
       </div>
     );
   };

@@ -3,6 +3,7 @@ import { Sale, SaleItem, PaymentMethod, User, SaleEditRequest } from '../types';
 import { generateUUID } from '../utils/crypto';
 import { generateReceiptNumber } from '../utils/formatters';
 import { NotificationService } from './notificationService';
+import { StoreService } from './storeService';
 import { canAccessShopAsAdmin, getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export interface CartItemInput {
@@ -156,9 +157,11 @@ export class SalesService {
         si => si.productId === prod.id && prod.shopId === params.shopId
       );
       if (soldItem) {
+        const nextFloorQty = prod.currentStock - soldItem.quantity;
+        const synced = StoreService.applyFloorStockDeltaToProduct(prod, nextFloorQty);
         return {
-          ...prod,
-          currentStock: prod.currentStock - soldItem.quantity,
+          ...synced,
+          currentStock: nextFloorQty,
           updatedAt: new Date().toISOString(),
         };
       }
@@ -268,8 +271,9 @@ export class SalesService {
         const prevQty = prod.currentStock;
         const newQty = prevQty + item.quantity;
 
+        const synced = StoreService.applyFloorStockDeltaToProduct(prod, newQty);
         products[prodIndex] = {
-          ...prod,
+          ...synced,
           currentStock: newQty,
           updatedAt: new Date().toISOString(),
         };
@@ -492,9 +496,11 @@ export class SalesService {
     for (const oldItem of sale.items) {
       const prodIndex = updatedProducts.findIndex(p => p.id === oldItem.productId);
       if (prodIndex !== -1) {
+        const nextQty = updatedProducts[prodIndex].currentStock + oldItem.quantity;
+        const synced = StoreService.applyFloorStockDeltaToProduct(updatedProducts[prodIndex], nextQty);
         updatedProducts[prodIndex] = {
-          ...updatedProducts[prodIndex],
-          currentStock: updatedProducts[prodIndex].currentStock + oldItem.quantity,
+          ...synced,
+          currentStock: nextQty,
           updatedAt: new Date().toISOString(),
         };
       }
@@ -503,9 +509,11 @@ export class SalesService {
     for (const newItem of newValues.items) {
       const prodIndex = updatedProducts.findIndex(p => p.id === newItem.productId);
       if (prodIndex !== -1) {
+        const nextQty = updatedProducts[prodIndex].currentStock - newItem.quantity;
+        const synced = StoreService.applyFloorStockDeltaToProduct(updatedProducts[prodIndex], nextQty);
         updatedProducts[prodIndex] = {
-          ...updatedProducts[prodIndex],
-          currentStock: updatedProducts[prodIndex].currentStock - newItem.quantity,
+          ...synced,
+          currentStock: nextQty,
           updatedAt: new Date().toISOString(),
         };
       }

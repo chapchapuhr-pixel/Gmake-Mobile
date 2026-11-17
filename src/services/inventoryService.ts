@@ -1,6 +1,7 @@
 import { db } from '../db/storage';
 import { InventoryMovement, MovementType, User } from '../types';
 import { generateUUID } from '../utils/crypto';
+import { StoreService } from './storeService';
 import { canAccessShopAsAdmin, getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export class InventoryService {
@@ -52,8 +53,9 @@ export class InventoryService {
     const shop = db.getShops().find(s => s.id === prod.shopId);
     const costValue = Number((Math.abs(diff) * (prod.purchasePrice || 0)).toFixed(2));
 
+    const synced = StoreService.applyFloorStockDeltaToProduct(prod, newQuantity);
     products[prodIndex] = {
-      ...prod,
+      ...synced,
       currentStock: newQuantity,
       updatedAt: new Date().toISOString(),
     };

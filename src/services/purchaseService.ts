@@ -2,6 +2,7 @@ import { db } from '../db/storage';
 import { Purchase, PurchaseItem, PaymentStatus, User } from '../types';
 import { generateUUID } from '../utils/crypto';
 import { generatePurchaseNumber } from '../utils/formatters';
+import { StoreService } from './storeService';
 import { canAccessShopAsAdmin, getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export interface PurchaseItemInput {
@@ -126,10 +127,34 @@ export class PurchaseService {
       if (targetStore) {
         const currentStoreStock = prod.storeStock || 0;
         const newStoreStock = currentStoreStock + itemInput.quantity;
+        const nextStoreStocks = { ...(prod.storeStocks || {}) };
+        const prevSpecificStoreQty =
+          nextStoreStocks[targetStore.id] !== undefined
+            ? Number(nextStoreStocks[targetStore.id] || 0)
+            : currentStoreStock;
+        nextStoreStocks[targetStore.id] = prevSpecificStoreQty + itemInput.quantity;
+
+        const nextStoreDetails = {
+          ...(prod.storeDetails || {}),
+          [targetStore.id]: {
+            ...(prod.storeDetails?.[targetStore.id] || {
+              storeId: targetStore.id,
+              storeName: targetStore.name,
+            }),
+            storeId: targetStore.id,
+            storeName: targetStore.name,
+            quantity: nextStoreStocks[targetStore.id],
+            unitPurchasePrice: Number(itemInput.unitCost.toFixed(2)),
+            unitSellingPrice: prod.sellingPrice || 0,
+            lastImportedAt: new Date().toISOString(),
+          },
+        };
 
         products[prodIndex] = {
           ...prod,
           storeStock: newStoreStock,
+          storeStocks: nextStoreStocks,
+          storeDetails: nextStoreDetails,
           purchasePrice: Number(itemInput.unitCost.toFixed(2)),
           updatedAt: new Date().toISOString(),
         };
@@ -158,9 +183,10 @@ export class PurchaseService {
         const currentStock = prod.currentStock || 0;
         const newStock = currentStock + itemInput.quantity;
         const prevStock = currentStock;
+        const synced = StoreService.applyFloorStockDeltaToProduct(prod, newStock);
 
         products[prodIndex] = {
-          ...prod,
+          ...synced,
           currentStock: newStock,
           purchasePrice: Number(itemInput.unitCost.toFixed(2)), // ✅ Always latest price
           updatedAt: new Date().toISOString(),
